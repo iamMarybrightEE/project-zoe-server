@@ -17,6 +17,7 @@ import { User } from '../users/entities/user.entity';
 import { ReportField } from './entities/report.field.entity';
 import GroupMembership from '../groups/entities/groupMembership.entity';
 import Group from '../groups/entities/group.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 
 jest.mock('src/utils/mailer', () => ({
   sendEmail: jest.fn().mockResolvedValue('mock-message-id'),
@@ -32,6 +33,7 @@ describe('ReportsService', () => {
   let mockAppLogger: Partial<AppLogger>;
   let mockTenantContext: Partial<TenantContext>;
   let mockFellowshipAttendanceService: Partial<FellowshipAttendanceService>;
+  let mockNotificationsService:Partial<NotificationsService>;
   let mockRepositories: any;
 
   beforeEach(async () => {
@@ -124,6 +126,13 @@ describe('ReportsService', () => {
       recordReportAttendance: jest.fn(),
       getMyMembers: jest.fn(),
     };
+    mockNotificationsService = {
+      create: jest.fn().mockResolvedValue({}),
+      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0 }),
+      getUnreadCount: jest.fn().mockResolvedValue(0),
+      markAsRead: jest.fn().mockResolvedValue({}),
+      markAllAsRead: jest.fn().mockResolvedValue({ updated: 0 }),
+    };
 
     mockAppLogger = {
       createContextLogger: jest.fn().mockReturnValue({
@@ -135,6 +144,7 @@ describe('ReportsService', () => {
         security: jest.fn(),
         error: jest.fn(),
       }),
+      
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -171,6 +181,10 @@ describe('ReportsService', () => {
         {
           provide: FellowshipAttendanceService,
           useValue: mockFellowshipAttendanceService,
+        },
+        {
+          provide: NotificationsService, 
+          useValue: mockNotificationsService,
         },
       ],
     }).compile();

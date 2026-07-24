@@ -42,6 +42,8 @@ import { Tenant } from '../tenants/entities/tenant.entity';
 import { FellowshipAttendanceService } from '../attendance/services/fellowship-attendance.service';
 import Contact from 'src/crm/entities/contact.entity';
 import { getPersonFullName } from 'src/crm/crm.helpers';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 
 @Injectable()
 export class ReportsService {
@@ -64,6 +66,7 @@ export class ReportsService {
     private readonly appLogger: AppLogger,
     private readonly tenantContext: TenantContext,
     private readonly fellowshipAttendanceService: FellowshipAttendanceService,
+    private readonly notificationsService: NotificationsService, 
   ) {
     this.reportRepository = connection.getRepository(Report);
     this.reportFieldRepository = connection.getRepository(ReportField);
@@ -76,6 +79,53 @@ export class ReportsService {
     this.userRepository = connection.getRepository(User);
     this.contactRepository = connection.getRepository(Contact);
     this.logger = this.appLogger.createContextLogger('ReportsService');
+  }
+  private async resolveReportSubmissionRecipients(
+    targetGroup: Group,
+  ): Promise<number[]> {
+    // Manual parentId walk, mirroring GroupTreeService.findAncestorIds.
+    // treeRepository.findAncestors() relies on the closure table, which can
+    // drift from parentId — same reason GroupTreeService avoids it.
+    const groupIds: number[] = [targetGroup.id];
+    const visited = new Set<number>([targetGroup.id]);
+
+    let currentParentId = targetGroup.parentId
+      ? Number(targetGroup.parentId)
+      : null;
+
+    while (currentParentId !== null && !isNaN(currentParentId)) {
+      if (visited.has(currentParentId)) break;
+      visited.add(currentParentId);
+      groupIds.push(currentParentId);
+
+      const parentGroup = await this.treeRepository.findOne({
+        where: { id: currentParentId },
+        select: ['id', 'parentId'],
+      });
+      currentParentId = parentGroup?.parentId ? Number(parentGroup.parentId) : null;
+    }
+
+    const leaderMemberships = await this.groupMembershipRepo.find({
+      where: {
+        groupId: In(groupIds),
+        role: GroupRole.Leader,
+        isActive: true,
+      },
+    });
+
+    const leaderContactIds = [
+      ...new Set(leaderMemberships.map((m) => m.contactId)),
+    ];
+    if (leaderContactIds.length === 0) {
+      return [];
+    }
+
+    const leaderUsers = await this.userRepository.find({
+      where: { contactId: In(leaderContactIds) },
+      select: ['id'],
+    });
+
+    return leaderUsers.map((u) => u.id);
   }
 
   async createReport(reportDto: ReportDto, user: UserDto): Promise<ReportDto> {
@@ -401,7 +451,31 @@ export class ReportsService {
         },
       );
     }
+    
+    const formattedDate = getHumanReadableDate(savedSubmission.submittedAt);
+    const fullName = getUserDisplayName(savedSubmission.user);
 
+    if (targetGroup) {
+      try {
+        const recipientUserIds = await this.resolveReportSubmissionRecipients(targetGroup);
+        await Promise.all(
+          recipientUserIds.map((userId) =>
+            this.notificationsService.create({
+              userId,
+              type: NotificationType.REPORT_SUBMITTED,
+              title: `${report.name} submitted`,
+              body: `${fullName} submitted for ${targetGroup.name}`,
+              link: `/reports/${report.id}/submissions/${savedSubmission.id}`,
+            }),
+          ),
+        );
+      } catch (err) {
+        this.logger.business('warn', 'Skipped report submission notifications', {
+          operation: 'submitReport',
+          metadata: { reportId, submissionId: savedSubmission.id, reason: err.message },
+        });
+      }
+    }
     // Prepare the response
     const response: ApiResponse<ReportSubmissionDataDto> = {
       data: {
@@ -413,10 +487,6 @@ export class ReportsService {
       status: HttpStatus.OK,
       message: 'Report submitted successfully.',
     };
-
-    // Send confirmation email (assuming sendMail is an asynchronous operation)
-    const formattedDate = getHumanReadableDate(savedSubmission.submittedAt);
-    const fullName = getUserDisplayName(savedSubmission.user);
     await this.sendMail(
       savedSubmission.user.username,
       'Project Zoe - Report Submitted',

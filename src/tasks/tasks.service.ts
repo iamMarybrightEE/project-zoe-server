@@ -22,6 +22,8 @@ import { CLOSED_STATUSES, TaskStatus } from './enums/task-status.enum';
 import { TaskType } from './enums/task-type.enum';
 import { ContactActivityType } from '../crm/enums/contact-activity-type.enum';
 import { GroupCategoryPurpose } from '../groups/enums/groups';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 
 const TASK_SUMMARY_RELATIONS = [
   'contact',
@@ -78,6 +80,7 @@ export class TasksService {
     private readonly tenantContext: TenantContext,
     private readonly contactActivityService: ContactActivityService,
     private readonly groupPermissionsService: GroupPermissionsService,
+    private readonly notificationsService: NotificationsService,
   ) {
     this.connection = connection;
     this.taskRepository = connection.getRepository(Task);
@@ -117,7 +120,22 @@ export class TasksService {
       referenceTable: 'task',
       referenceId: saved.id,
     });
-
+    // tasks.service.ts — inside create()
+    if (dto.assignedToId) {
+      try {
+        await this.notificationsService.create({
+          userId: dto.assignedToId,
+          type: NotificationType.TASK_ASSIGNED,
+          title: 'New task assigned',
+          body: `You've been assigned a ${dto.type} task`,
+          link: `/tasks/${saved.id}`,
+        });
+      } catch (err) {
+        // Don't let a notification failure break task creation
+        console.error('Failed to send task-assigned notification:', err);
+      }
+    }
+    
     return this.findTaskWithRelations(saved.id, tenantId);
   }
 
@@ -811,6 +829,18 @@ export class TasksService {
       referenceTable: 'task',
       referenceId: task.id,
     });
+    // tasks.service.ts — inside reassign(), same pattern
+    try {
+      await this.notificationsService.create({
+        userId: assignedToId,
+        type: NotificationType.TASK_ASSIGNED,
+        title: 'New task assigned',
+        body: `You've been assigned a ${task.type} task`,
+        link: `/tasks/${task.id}`,
+      });
+    } catch (err) {
+      console.error('Failed to send task-assigned notification:', err);
+    }
 
     return this.findTaskWithRelations(saved.id, tenantId);
   }

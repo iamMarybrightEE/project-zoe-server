@@ -11,6 +11,7 @@ import { TenantContext } from '../shared/tenant/tenant-context';
 import { ContactActivityService } from '../crm/contact-activity.service';
 import { GroupPermissionsService } from '../groups/services/group-permissions.service';
 import { roleAdmin } from '../auth/constants';
+import { NotificationsService } from '../notifications/notifications.service';
 
 // TenantAwareRepository requires a real TypeORM EntityManager; intercept its
 // constructor so the test can supply mockGroupRepo without a live connection.
@@ -50,6 +51,7 @@ describe('TasksService — location-based visibility scoping', () => {
   let groupQb: any;
   let membershipQb: any;
   let commentQb: any;
+  let mockNotificationsService:any;
 
   const buildUser = (overrides: Record<string, any> = {}) => ({
     id: 100,
@@ -89,6 +91,13 @@ describe('TasksService — location-based visibility scoping', () => {
     mockGroupRepo = {
       createQueryBuilder: jest.fn().mockReturnValue(groupQb),
     };
+    mockNotificationsService = {
+      create: jest.fn().mockResolvedValue({}),
+      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0 }),
+      getUnreadCount: jest.fn().mockResolvedValue(0),
+      markAsRead: jest.fn().mockResolvedValue({}),
+      markAllAsRead: jest.fn().mockResolvedValue({ updated: 0 }),
+    };
     // Must be set before module.compile() so the TenantAwareRepository mock
     // returns the current mockGroupRepo when the service is constructed.
     groupRepoForTest = mockGroupRepo;
@@ -124,6 +133,10 @@ describe('TasksService — location-based visibility scoping', () => {
         {
           provide: GroupPermissionsService,
           useValue: mockGroupPermissionsService,
+        },
+        {
+          provide: NotificationsService, 
+          useValue: mockNotificationsService,
         },
       ],
     }).compile();

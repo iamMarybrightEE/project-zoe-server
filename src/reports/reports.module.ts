@@ -10,9 +10,11 @@ import { GroupPermissionsService } from 'src/groups/services/group-permissions.s
 import { GroupTreeService } from 'src/groups/services/group-tree.service';
 import { AppLogger } from 'src/utils/app-logger.service';
 import { AttendanceModule } from 'src/attendance/attendance.module';
+import { NotificationsModule } from 'src/notifications/notifications.module';
 
 @Module({
   imports: [
+    NotificationsModule,
     VendorModule,
     HttpModule,
     TypeOrmModule.forFeature([...appEntities]),
