@@ -6,8 +6,8 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import {Tenant} from '../../tenants/entities/tenant.entity'; // adjust path to your actual Tenant entity
-import {User} from '../../users/entities/user.entity'; // adjust path to your actual User entity
+import {Tenant} from '../../tenants/entities/tenant.entity'; 
+import {User} from '../../users/entities/user.entity';
 
 export enum NotificationType {
   TASK_ASSIGNED = 'task_assigned',
@@ -18,8 +18,8 @@ export enum NotificationType {
 }
 
 @Entity('notifications')
-@Index(['tenant', 'user', 'isRead'])
-@Index(['tenant', 'user', 'createdAt'])
+@Index(['tenantId', 'user', 'isRead'])
+@Index(['tenantId', 'user', 'createdAt'])
 export default class Notification {
   @PrimaryGeneratedColumn()
   id: number;

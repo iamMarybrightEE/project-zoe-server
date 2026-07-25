@@ -107,12 +107,19 @@ export class ReportsService {
       currentParentId = parentGroup?.parentId ? Number(parentGroup.parentId) : null;
     }
 
+    // groupIds above were only ever discovered via tenant-scoped
+    // treeRepository lookups, but the membership query itself is
+    // unscoped — filter through the tenant-scoped group relation so a
+    // stray/duplicate groupId in another tenant can never leak a leader
+    // into this tenant's recipient list.
     const leaderMemberships = await this.groupMembershipRepo.find({
       where: {
         groupId: In(groupIds),
         role: GroupRole.Leader,
         isActive: true,
+        group: { tenant: { id: tenantId } as any },
       },
+      relations: ['group'],
     });
 
     const leaderContactIds = [
@@ -459,8 +466,9 @@ export class ReportsService {
 
     if (targetGroup) {
       try {
-        const recipientUserIds = await this.resolveReportSubmissionRecipients(targetGroup);
-        await Promise.all(
+        const recipientUserIds =
+          await this.resolveReportSubmissionRecipients(targetGroup);
+        const notificationResults = await Promise.allSettled(
           recipientUserIds.map((userId) =>
             this.notificationsService.create({
               userId,
@@ -471,11 +479,40 @@ export class ReportsService {
             }),
           ),
         );
-      } catch (err) {
-        this.logger.business('warn', 'Skipped report submission notifications', {
-          operation: 'submitReport',
-          metadata: { reportId, submissionId: savedSubmission.id, reason: err.message },
+        notificationResults.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            this.logger.business(
+              'warn',
+              'Skipped report submission notification',
+              {
+                operation: 'submitReport',
+                metadata: {
+                  reportId,
+                  submissionId: savedSubmission.id,
+                  userId: recipientUserIds[index],
+                  reason: result.reason?.message,
+                },
+              },
+            );
+          }
         });
+      } catch (err) {
+        // Covers failures in resolveReportSubmissionRecipients itself
+        // (e.g. a DB error walking the group tree) — the report was already
+        // submitted successfully, so a recipient-resolution failure must not
+        // fail the whole request.
+        this.logger.business(
+          'warn',
+          'Skipped report submission notifications',
+          {
+            operation: 'submitReport',
+            metadata: {
+              reportId,
+              submissionId: savedSubmission.id,
+              reason: err.message,
+            },
+          },
+        );
       }
     }
     // Prepare the response

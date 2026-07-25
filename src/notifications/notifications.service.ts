@@ -47,15 +47,23 @@ export class NotificationsService {
 
     const saved = await this.notificationRepository.save(notification);
 
-    this.notificationsGateway.emitToUser(tenantId, dto.userId, {
-      id: saved.id,
-      type: saved.type,
-      title: saved.title,
-      body: saved.body,
-      link: saved.link,
-      isRead: saved.isRead,
-      createdAt: saved.createdAt,
-    });
+    // The real-time push is best-effort: a gateway error (e.g. no server
+    // yet during bootstrap, adapter failure) must not fail the request,
+    // since the notification row is already committed and will still
+    // surface via findAllForUser/getUnreadCount.
+    try {
+      this.notificationsGateway.emitToUser(tenantId, dto.userId, {
+        id: saved.id,
+        type: saved.type,
+        title: saved.title,
+        body: saved.body,
+        link: saved.link,
+        isRead: saved.isRead,
+        createdAt: saved.createdAt,
+      });
+    } catch (err) {
+      console.error('Failed to emit real-time notification:', err);
+    }
 
     return saved;
   }

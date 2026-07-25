@@ -304,8 +304,10 @@ export class TasksService {
     const tenantId = this.tenantContext.requireTenant();
     const task = await this.taskRepository.findOne({
       where: { id: taskId, tenant: { id: tenantId } },
+      relations: ['assignedTo'],
     });
     if (!task) throw new NotFoundException(`Task ${taskId} not found`);
+    const previousAssignedToId = task.assignedTo?.id ?? null;
 
     if (dto.title !== undefined) task.title = dto.title;
     if (dto.assignedToId !== undefined) {
@@ -318,6 +320,28 @@ export class TasksService {
     }
 
     await this.taskRepository.save(task);
+
+    // Notify only when the assignment actually changed to a new assignee
+    // (mirrors the notification sent in create()/reassign()); clearing an
+    // assignment (assignedToId === null) has no one to notify.
+    const assignmentChanged =
+      dto.assignedToId !== undefined &&
+      dto.assignedToId !== null &&
+      dto.assignedToId !== previousAssignedToId;
+    if (assignmentChanged) {
+      try {
+        await this.notificationsService.create({
+          userId: dto.assignedToId,
+          type: NotificationType.TASK_ASSIGNED,
+          title: 'New task assigned',
+          body: `You've been assigned a ${task.type} task`,
+          link: `/tasks/${task.id}`,
+        });
+      } catch (err) {
+        console.error('Failed to send task-assigned notification:', err);
+      }
+    }
+
     return this.findTaskWithRelations(taskId, tenantId);
   }
 

@@ -33,6 +33,7 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       const payload = await this.jwtService.verifyAsync(token);
       const userId = payload.id ?? payload.sub;
       const tenantId = payload.tenantId;
+      if (!userId) throw new Error('Missing user context');
       if (!tenantId) throw new Error('Missing tenant context');
 
       client.data.userId = userId;
@@ -51,9 +52,10 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
 
   handleDisconnect(client: Socket) {
     const userId = client.data.userId;
-    if (userId && this.userSockets.has(userId)) {
-      this.userSockets.get(userId)!.delete(client.id);
-    }
+    const sockets = userId ? this.userSockets.get(userId) : undefined;
+    if (!sockets) return;
+    sockets.delete(client.id);
+    if (sockets.size === 0) this.userSockets.delete(userId);
   }
 
   // Called by NotificationsService right after a notification is persisted

@@ -98,6 +98,9 @@ describe('NotificationsService', () => {
         }),
       );
       expect(mockNotificationRepo.save).toHaveBeenCalled();
+      expect(mockUserRepo.findOne).toHaveBeenCalledWith({
+        where: { id: dto.userId, tenant: { id: TENANT_ID } },
+      });
     });
 
     it('throws BadRequestException when recipient user does not belong to active tenant', async () => {
