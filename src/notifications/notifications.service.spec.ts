@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { Connection } from 'typeorm';
 import { NotificationsService } from './notifications.service';
 import Notification, { NotificationType } from './entities/notification.entity';
@@ -98,6 +98,15 @@ describe('NotificationsService', () => {
         }),
       );
       expect(mockNotificationRepo.save).toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when recipient user does not belong to active tenant', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      const dto = buildDto();
+
+      await expect(service.create(dto)).rejects.toThrow(BadRequestException);
+      expect(mockNotificationRepo.save).not.toHaveBeenCalled();
+      expect(mockGateway.emitToUser).not.toHaveBeenCalled();
     });
 
     it('defaults body and link to null when not provided', async () => {

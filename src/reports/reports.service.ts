@@ -80,9 +80,11 @@ export class ReportsService {
     this.contactRepository = connection.getRepository(Contact);
     this.logger = this.appLogger.createContextLogger('ReportsService');
   }
-  private async resolveReportSubmissionRecipients(
+    private async resolveReportSubmissionRecipients(
     targetGroup: Group,
   ): Promise<number[]> {
+    const tenantId = this.tenantContext.requireTenant();
+    
     // Manual parentId walk, mirroring GroupTreeService.findAncestorIds.
     // treeRepository.findAncestors() relies on the closure table, which can
     // drift from parentId — same reason GroupTreeService avoids it.
@@ -99,7 +101,7 @@ export class ReportsService {
       groupIds.push(currentParentId);
 
       const parentGroup = await this.treeRepository.findOne({
-        where: { id: currentParentId },
+        where: { id: currentParentId, tenant: { id: tenantId } as any },
         select: ['id', 'parentId'],
       });
       currentParentId = parentGroup?.parentId ? Number(parentGroup.parentId) : null;
@@ -121,7 +123,7 @@ export class ReportsService {
     }
 
     const leaderUsers = await this.userRepository.find({
-      where: { contactId: In(leaderContactIds) },
+      where: { contactId: In(leaderContactIds), tenant: { id: tenantId } },
       select: ['id'],
     });
 

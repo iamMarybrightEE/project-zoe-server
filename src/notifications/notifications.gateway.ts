@@ -9,7 +9,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 
 @Injectable()
-@WebSocketGateway({ namespace: '/notifications', cors: { origin: true, credentials: true } })
+@WebSocketGateway({
+  namespace: '/notifications',
+  cors: {
+    origin: process.env.FRONTEND_ORIGIN?.split(',').map((o) => o.trim()) ?? false,
+    credentials: true,
+  },
+})
 export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
@@ -38,6 +44,7 @@ export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisco
       }
       this.userSockets.get(userId)!.add(client.id);
     } catch (err) {
+      this.logger.warn(`Rejecting socket connection: ${err instanceof Error ? err.message : err}`);
       client.disconnect(true);
     }
   }

@@ -25,13 +25,10 @@ export class NotificationsController {
     @Query('limit') limit = 20,
     @Request() req: any,
   ) {
-    // Parse inputs to integers and fallback to defaults if they are NaN
-    const parsedPage = Math.max(1, parseInt(page as any, 10) || 1);
-    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit as any, 10) || 20));
     return this.notificationsService.findAllForUser(
       req.user.id,
-      parsedPage,
-      parsedLimit,
+      parseInt(page as any, 10),
+      parseInt(limit as any, 10),
     );
   }
 

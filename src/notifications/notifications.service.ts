@@ -20,17 +20,16 @@ export class NotificationsService {
     this.userRepository = connection.getRepository(User);
   }
 
-  // Call this from anywhere in the app (task assignment, report submission, etc.)
-  // to create + push a notification in one step.
   async create(dto: CreateNotificationDto): Promise<Notification> {
     const tenantId = this.tenantContext.requireTenant();
 
-    // Verify recipient belongs to the active tenant using the relation structure
     const userExistsInTenant = await this.userRepository.findOne({
       where: { id: dto.userId, tenant: { id: tenantId } },
     });
     if (!userExistsInTenant) {
-      throw new BadRequestException(`User ${dto.userId} does not belong to tenant ${tenantId}`);
+      throw new BadRequestException(
+        `User ${dto.userId} does not belong to tenant ${tenantId}`,
+      );
     }
 
     const notification = this.notificationRepository.create({
@@ -48,7 +47,6 @@ export class NotificationsService {
 
     const saved = await this.notificationRepository.save(notification);
 
-    // Pass tenantId as the first parameter to target the tenant-scoped room
     this.notificationsGateway.emitToUser(tenantId, dto.userId, {
       id: saved.id,
       type: saved.type,
@@ -68,8 +66,6 @@ export class NotificationsService {
     limit = 20,
   ): Promise<{ data: Notification[]; total: number; unreadCount: number }> {
     const tenantId = this.tenantContext.requireTenant();
-
-    // Validate and cap pagination parameters to prevent query failures and unbounded reads
     const validatedPage = Math.max(1, Math.floor(Number(page)) || 1);
     const validatedLimit = Math.min(100, Math.max(1, Math.floor(Number(limit)) || 20));
 

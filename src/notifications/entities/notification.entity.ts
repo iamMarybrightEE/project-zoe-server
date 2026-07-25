@@ -19,6 +19,7 @@ export enum NotificationType {
 
 @Entity('notifications')
 @Index(['tenant', 'user', 'isRead'])
+@Index(['tenant', 'user', 'createdAt'])
 export default class Notification {
   @PrimaryGeneratedColumn()
   id: number;

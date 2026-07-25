@@ -93,7 +93,7 @@ describe('TasksService — location-based visibility scoping', () => {
     };
     mockNotificationsService = {
       create: jest.fn().mockResolvedValue({}),
-      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0 }),
+      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0, unreadCount: 0, }),
       getUnreadCount: jest.fn().mockResolvedValue(0),
       markAsRead: jest.fn().mockResolvedValue({}),
       markAllAsRead: jest.fn().mockResolvedValue({ updated: 0 }),
