@@ -6,8 +6,8 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import {Tenant} from '../../tenants/entities/tenant.entity'; 
-import {User} from '../../users/entities/user.entity';
+import { Tenant } from '../../tenants/entities/tenant.entity'; 
+import { User } from '../../users/entities/user.entity';
 
 export enum NotificationType {
   TASK_ASSIGNED = 'task_assigned',
