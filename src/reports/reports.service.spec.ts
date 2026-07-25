@@ -668,11 +668,12 @@ describe('ReportsService', () => {
       (mockNotificationsService.create as jest.Mock).mockRejectedValueOnce(
         new Error('Realtime push failed'),
       );
+      (mockNotificationsService.create as jest.Mock).mockResolvedValueOnce(undefined);
 
       const result = await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
 
       expect(result).toBeDefined();
-      expect(mockNotificationsService.create).toHaveBeenCalled();
+      expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
     });
   });
 });
