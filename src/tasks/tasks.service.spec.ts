@@ -371,7 +371,7 @@ describe('TasksService — location-based visibility scoping', () => {
         expect.objectContaining({
           userId: 42,
           type: NotificationType.TASK_ASSIGNED,
-          link: '/tasks/999',
+          link: '/tasks/mine',
         }),
       );
     });
@@ -425,7 +425,7 @@ describe('TasksService — location-based visibility scoping', () => {
         type: NotificationType.TASK_ASSIGNED,
         title: 'New task assigned',
         body: expect.stringContaining('FOLLOW_UP'),
-        link: '/tasks/9',
+        link: '/tasks/mine',
       });
     });
 
@@ -470,7 +470,7 @@ describe('TasksService — location-based visibility scoping', () => {
         expect.objectContaining({
           userId: 2,
           type: NotificationType.TASK_ASSIGNED,
-          link: '/tasks/20',
+          link: '/tasks/mine',
         }),
       );
     });
