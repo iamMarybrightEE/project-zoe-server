@@ -475,7 +475,7 @@ export class ReportsService {
               type: NotificationType.REPORT_SUBMITTED,
               title: `${report.name} submitted`,
               body: `${fullName} submitted for ${targetGroup.name}`,
-              link: `/reports/${report.id}/submissions/${savedSubmission.id}`,
+              link: `/reports`,
             }),
           ),
         );

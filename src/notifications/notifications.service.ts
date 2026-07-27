@@ -1,15 +1,19 @@
-import { Inject, Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { Connection, Repository } from 'typeorm';
+import { Inject, Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { Connection, Repository, LessThan } from 'typeorm';
 import Notification, { NotificationType } from './entities/notification.entity';
 import { CreateNotificationDto } from './dto/create-notification.dto';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { NotificationsGateway } from './notifications.gateway';
 import { User } from '../users/entities/user.entity';
 
+const NOTIFICATION_RETENTION_DAYS = 30;
+
 @Injectable()
 export class NotificationsService {
   private readonly notificationRepository: Repository<Notification>;
   private readonly userRepository: Repository<User>;
+  private readonly logger = new Logger(NotificationsService.name);
 
   constructor(
     @Inject('CONNECTION') connection: Connection,
@@ -121,5 +125,21 @@ export class NotificationsService {
       .execute();
 
     return { updated: result.affected ?? 0 };
+  }
+
+  // Runs daily; deletes notifications older than NOTIFICATION_RETENTION_DAYS
+  // across all tenants (this is housekeeping, not a per-tenant request, so
+  // it intentionally does not go through TenantContext).
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async deleteOldNotifications(): Promise<{ deleted: number }> {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - NOTIFICATION_RETENTION_DAYS);
+    const result = await this.notificationRepository.delete({
+      createdAt: LessThan(cutoff),
+    });
+    this.logger.log(
+      `Deleted ${result.affected ?? 0} notifications older than ${NOTIFICATION_RETENTION_DAYS} days`,
+    );
+    return { deleted: result.affected ?? 0 };
   }
 }

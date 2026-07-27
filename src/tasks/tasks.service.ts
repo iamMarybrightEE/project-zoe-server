@@ -128,7 +128,7 @@ export class TasksService {
           type: NotificationType.TASK_ASSIGNED,
           title: 'New task assigned',
           body: `You've been assigned a ${dto.type} task`,
-          link: `/tasks/${saved.id}`,
+          link: '/tasks/mine',
         });
       } catch (err) {
         // Don't let a notification failure break task creation
@@ -335,7 +335,7 @@ export class TasksService {
           type: NotificationType.TASK_ASSIGNED,
           title: 'New task assigned',
           body: `You've been assigned a ${task.type} task`,
-          link: `/tasks/${task.id}`,
+          link: '/tasks/mine',
         });
       } catch (err) {
         console.error('Failed to send task-assigned notification:', err);
@@ -860,7 +860,7 @@ export class TasksService {
         type: NotificationType.TASK_ASSIGNED,
         title: 'New task assigned',
         body: `You've been assigned a ${task.type} task`,
-        link: `/tasks/${task.id}`,
+        link: '/tasks/mine',
       });
     } catch (err) {
       console.error('Failed to send task-assigned notification:', err);
