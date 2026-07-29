@@ -142,9 +142,13 @@ computation functions. New computed report types are registered there.
 ## 5. ORM / Schema
 
 The project uses TypeORM with `synchronize` controlled by the `DB_SYNCHRONIZE`
-environment variable (`true` in development, `false` in production). There is no
-migrations directory — production schema changes must be applied manually or via
-a migration script.
+environment variable (`true` in development, `false` in production).
+
+Schema changes ship as migrations in `src/migrations/` (CLI configured in
+`src/data-source.ts`, which always has `synchronize: false`; scripts:
+`npm run migration:generate|run|revert|show`). **The deploy workflows
+auto-run `npm run migration:run` against staging (on push to `develop`) and
+production (on push to `master`)** — merging a migration is deploying it.
 
 ## 6. Seeding
 

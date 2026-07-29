@@ -1,0 +1,30 @@
+# CodeRabbit configuration — https://docs.coderabbit.ai/reference/configuration
+# Note: this file overrides any settings made in the CodeRabbit web UI.
+language: en-US
+reviews:
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    # develop only: release PRs (develop -> master) contain already-reviewed
+    # commits and are excluded by not listing master here.
+    base_branches:
+      - develop
+  path_instructions:
+    - path: "src/**/*.ts"
+      instructions: |
+        This is a row-level multi-tenant application. Queries against
+        tenant-owned data must be tenant-scoped: either through
+        TenantAwareRepository or an explicit tenantId filter (TenantContext).
+        Flag any new query that could return another tenant's rows as a
+        critical issue. Intentionally global or cross-tenant queries (Tenant
+        lookups, seeding, platform administration) are acceptable only when a
+        comment documents why.
+    - path: "src/attendance/**"
+      instructions: |
+        ServiceInstance and FellowshipInstance are for individual check-ins only.
+        Flag any change that adds aggregate/reporting fields to them — aggregate
+        data belongs in the Report/ReportSubmission system.
+    - path: "src/migrations/**"
+      instructions: |
+        Migrations auto-run against staging and production on deploy. Scrutinize
+        for irreversible operations, missing down() logic, and data loss.
