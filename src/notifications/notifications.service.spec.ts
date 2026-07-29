@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException, BadRequestException } from '@nestjs/common';
-import { Connection } from 'typeorm';
+import { Connection, LessThan } from 'typeorm';
+import { Logger } from '@nestjs/common';
 import { NotificationsService } from './notifications.service';
 import Notification, { NotificationType } from './entities/notification.entity';
 import { TenantContext } from '../shared/tenant/tenant-context';
@@ -46,6 +47,7 @@ describe('NotificationsService', () => {
       count: jest.fn(),
       findOne: jest.fn(),
       createQueryBuilder: jest.fn(),
+      delete: jest.fn(),
     };
 
     mockUserRepo = {                                
@@ -258,6 +260,64 @@ describe('NotificationsService', () => {
       const result = await service.markAllAsRead(USER_ID);
 
       expect(result).toEqual({ updated: 0 });
+    });
+  });
+  describe('deleteOldNotifications', () => {
+    it('deletes notifications older than the retention window', async () => {
+      mockNotificationRepo.delete.mockResolvedValue({ affected: 7 });
+
+      const result = await service.deleteOldNotifications();
+
+      expect(mockNotificationRepo.delete).toHaveBeenCalledTimes(1);
+      const callArg = mockNotificationRepo.delete.mock.calls[0][0];
+      expect(callArg.createdAt.type).toBe('lessThan');
+      expect(result).toEqual({ deleted: 7 });
+    });
+
+    it('computes the cutoff as ~30 days before now', async () => {
+      mockNotificationRepo.delete.mockResolvedValue({ affected: 0 });
+
+      const before = Date.now();
+      await service.deleteOldNotifications();
+      const after = Date.now();
+
+      const callArg = mockNotificationRepo.delete.mock.calls[0][0];
+      const cutoff: Date = callArg.createdAt.value;
+
+      const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      expect(cutoff.getTime()).toBeGreaterThanOrEqual(before - THIRTY_DAYS_MS - 1000);
+      expect(cutoff.getTime()).toBeLessThanOrEqual(after - THIRTY_DAYS_MS + 1000);
+    });
+
+    it('is not scoped to a tenant or user', async () => {
+      mockNotificationRepo.delete.mockResolvedValue({ affected: 1 });
+
+      await service.deleteOldNotifications();
+
+      const callArg = mockNotificationRepo.delete.mock.calls[0][0];
+      expect(callArg).not.toHaveProperty('tenantId');
+      expect(callArg).not.toHaveProperty('userId');
+      expect(Object.keys(callArg)).toEqual(['createdAt']);
+    });
+
+    it('returns 0 deleted when affected is null', async () => {
+      mockNotificationRepo.delete.mockResolvedValue({ affected: null });
+
+      const result = await service.deleteOldNotifications();
+
+      expect(result).toEqual({ deleted: 0 });
+    });
+
+    it('logs the number of deleted notifications', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      mockNotificationRepo.delete.mockResolvedValue({ affected: 5 });
+
+      await service.deleteOldNotifications();
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Deleted 5 notifications older than 30 days'),
+      );
+      logSpy.mockRestore();
     });
   });
 });
