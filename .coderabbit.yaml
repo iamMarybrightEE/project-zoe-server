@@ -12,10 +12,13 @@ reviews:
   path_instructions:
     - path: "src/**/*.ts"
       instructions: |
-        This is a row-level multi-tenant application. Every database query in a
-        service must be tenant-scoped: either through TenantAwareRepository or an
-        explicit tenantId filter (TenantContext). Flag any new query that could
-        return another tenant's rows as a critical issue.
+        This is a row-level multi-tenant application. Queries against
+        tenant-owned data must be tenant-scoped: either through
+        TenantAwareRepository or an explicit tenantId filter (TenantContext).
+        Flag any new query that could return another tenant's rows as a
+        critical issue. Intentionally global or cross-tenant queries (Tenant
+        lookups, seeding, platform administration) are acceptable only when a
+        comment documents why.
     - path: "src/attendance/**"
       instructions: |
         ServiceInstance and FellowshipInstance are for individual check-ins only.
