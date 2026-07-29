@@ -17,6 +17,8 @@ import { User } from '../users/entities/user.entity';
 import { ReportField } from './entities/report.field.entity';
 import GroupMembership from '../groups/entities/groupMembership.entity';
 import Group from '../groups/entities/group.entity';
+import { GroupRole } from '../groups/enums/groupRole';
+import { NotificationsService } from '../notifications/notifications.service';
 
 jest.mock('src/utils/mailer', () => ({
   sendEmail: jest.fn().mockResolvedValue('mock-message-id'),
@@ -32,6 +34,7 @@ describe('ReportsService', () => {
   let mockAppLogger: Partial<AppLogger>;
   let mockTenantContext: Partial<TenantContext>;
   let mockFellowshipAttendanceService: Partial<FellowshipAttendanceService>;
+  let mockNotificationsService:Partial<NotificationsService>;
   let mockRepositories: any;
 
   beforeEach(async () => {
@@ -124,6 +127,13 @@ describe('ReportsService', () => {
       recordReportAttendance: jest.fn(),
       getMyMembers: jest.fn(),
     };
+    mockNotificationsService = {
+      create: jest.fn().mockResolvedValue({}),
+      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0 }),
+      getUnreadCount: jest.fn().mockResolvedValue(0),
+      markAsRead: jest.fn().mockResolvedValue({}),
+      markAllAsRead: jest.fn().mockResolvedValue({ updated: 0 }),
+    };
 
     mockAppLogger = {
       createContextLogger: jest.fn().mockReturnValue({
@@ -135,6 +145,7 @@ describe('ReportsService', () => {
         security: jest.fn(),
         error: jest.fn(),
       }),
+      
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -171,6 +182,10 @@ describe('ReportsService', () => {
         {
           provide: FellowshipAttendanceService,
           useValue: mockFellowshipAttendanceService,
+        },
+        {
+          provide: NotificationsService, 
+          useValue: mockNotificationsService,
         },
       ],
     }).compile();
@@ -604,6 +619,61 @@ describe('ReportsService', () => {
           }),
         }),
       );
+    });
+  });
+  describe('Report Submission Notifications (dispatch)', () => {
+    const baseReportWithGroup = {
+      id: 1,
+      name: 'Weekly Report',
+      status: ReportStatus.ACTIVE,
+      groupFieldName: 'groupId', // needed so selectedGroupId resolves from data.groupId
+      targetGroupCategory: undefined,
+      fields: [],
+    } as unknown as Report;
+
+    const mockTargetGroup = { id: 10, name: 'MC Nairobi', parentId: undefined } as Group;
+
+    it('dispatches a notification per resolved recipient and tolerates individual failures', async () => {
+      (mockNotificationsService.create as jest.Mock).mockClear();
+
+      const reportId = 1;
+      const submittingUser = { id: 7, contactId: 3 } as any;
+
+      mockRepositories.report.findOne.mockResolvedValue(baseReportWithGroup);
+      mockRepositories.user.findOne.mockResolvedValue({ id: 7, contactId: 3, username: 'shepherd@example.com' });
+      mockRepositories.groupMembership.findOne.mockResolvedValue({ group: { id: 10, category: undefined } });
+      mockGroupPermissionsService.hasPermissionForGroup = jest.fn().mockResolvedValue(true);
+      mockRepositories.groupTree.findOne.mockResolvedValue(mockTargetGroup);
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(null);
+      mockRepositories.reportSubmission.save.mockImplementation((sub: any) =>
+        Promise.resolve({ id: 99, ...sub }),
+      );
+      mockRepositories.reportField.find.mockResolvedValue([{ name: 'groupId' }]);
+
+      jest
+        .spyOn(service as any, 'resolveReportSubmissionRecipients')
+        .mockResolvedValue([10, 11]);
+
+      await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
+
+      expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
+      expect(mockNotificationsService.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 10, type: 'report_submitted' }),
+      );
+      expect(mockNotificationsService.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 11, type: 'report_submitted' }),
+      );
+
+      (mockNotificationsService.create as jest.Mock).mockClear();
+      (mockNotificationsService.create as jest.Mock).mockRejectedValueOnce(
+        new Error('Realtime push failed'),
+      );
+      (mockNotificationsService.create as jest.Mock).mockResolvedValueOnce(undefined);
+
+      const result = await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
+
+      expect(result).toBeDefined();
+      expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
     });
   });
 });

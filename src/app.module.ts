@@ -29,6 +29,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { redisStore } from 'cache-manager-redis-yet';
 import { AppLogger } from './utils/app-logger.service';
 import { PerformanceMonitoringInterceptor } from './interceptors/performance-monitoring.interceptor';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Global()
 @Module({
@@ -68,6 +69,7 @@ import { PerformanceMonitoringInterceptor } from './interceptors/performance-mon
     TasksModule,
     ServiceRecordingModule,
     AttendanceModule,
+    NotificationsModule,
   ],
   exports: [AppService],
   controllers: [AuthController],
