@@ -175,4 +175,10 @@ export class GroupController {
   ): Promise<void> {
     await this.service.remove(id, rawRequest.user);
   }
+  @Get('contact-location/:contactId')
+  async getContactLocationGroup(
+    @Param('contactId', ParseIntPipe) contactId: number,
+  ): Promise<{ id: number; name: string } | null> {
+    return this.service.getContactLocationGroup(contactId);
+  }
 }

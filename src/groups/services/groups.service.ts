@@ -1194,4 +1194,18 @@ export class GroupsService {
       skippedCount: skippedCount + result.failedCount,
     };
   }
+  async getContactLocationGroup(
+    contactId: number,
+  ): Promise<{ id: number; name: string } | null> {
+    const groupId =
+      await this.groupsPermissionsService.getContactLocationGroupId(contactId);
+    if (groupId === null) {
+      return null;
+    }
+    const tenantId = this.tenantContext.requireTenant();
+    const group = await this.repository.findOne({
+      where: { id: groupId, tenant: { id: tenantId } },
+      select: ['id', 'name'],
+    });    return group ? { id: group.id, name: group.name } : null;
+  }
 }

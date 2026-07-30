@@ -72,6 +72,7 @@ describe('TasksService — location-based visibility scoping', () => {
     });
     membershipQb = createChainableQb({
       getCount: jest.fn().mockResolvedValue(0),
+      getMany: jest.fn().mockResolvedValue([]),
     });
     commentQb = createChainableQb({
       getRawMany: jest.fn().mockResolvedValue([]),

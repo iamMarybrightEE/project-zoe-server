@@ -292,9 +292,15 @@ export class TasksService {
 
   async findOne(taskId: number, user: any): Promise<Task> {
     const tenantId = this.tenantContext.requireTenant();
-    const task = await this.findTaskWithRelations(taskId, tenantId);
+    const task = await this.taskRepository.findOne({
+      where: { id: taskId, tenant: { id: tenantId } },
+      relations: ['contact'],
+    });
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
     await this.assertContactLocationAccess(task.contact.id, user);
-    return task;
+    return this.findTaskWithRelations(taskId, tenantId);
   }
 
   async update(
@@ -518,7 +524,7 @@ export class TasksService {
   private async findTaskWithRelations(
     taskId: number,
     tenantId: number,
-  ): Promise<Task> {
+  ): Promise<TaskWithLocationGroup> {
     const task = await this.taskRepository.findOne({
       where: { id: taskId, tenant: { id: tenantId } },
       relations: [...TASK_DETAIL_RELATIONS],
@@ -528,9 +534,14 @@ export class TasksService {
       throw new NotFoundException(`Task ${taskId} not found`);
     }
 
-    this.sanitizeTaskUsers(task);
-    this.attachContactAddress(task);
-    return task;
+    const [taskWithLocationGroup] = await this.attachLocationGroups(
+      [task],
+      tenantId,
+    );
+
+    this.sanitizeTaskUsers(taskWithLocationGroup);
+    this.attachContactAddress(taskWithLocationGroup);
+    return taskWithLocationGroup;
   }
 
   private sanitizeTaskUsers(task: Task): void {

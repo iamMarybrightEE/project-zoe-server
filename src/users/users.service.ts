@@ -23,6 +23,8 @@ import { GroupsMembershipService } from '../groups/services/group-membership.ser
 import { GroupRole } from '../groups/enums/groupRole';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { Tenant } from '../tenants/entities/tenant.entity';
+import GroupMembership from '../groups/entities/groupMembership.entity';
+import Group from '../groups/entities/group.entity';
 
 @Injectable()
 export class UsersService {
@@ -367,6 +369,56 @@ export class UsersService {
 
   async remove(id: number): Promise<void> {
     await this.repository.delete(id);
+  }
+  async findUsersInGroup(groupId: number): Promise<UserListDto[]> {
+    const tenantId = this.tenantContext.requireTenant();
+    
+    const groupRepository = this.repository.manager.getRepository(Group);
+    const membershipRepository = this.repository.manager.getRepository(GroupMembership);
+
+    let fobGroupId: number | null = null;
+    let currentId: number | null = groupId;
+    const visited = new Set<number>();
+    
+    while (currentId !== null && !visited.has(currentId)) {
+      visited.add(currentId);
+      const group = await groupRepository.findOne({
+        where: { 
+          id: currentId,
+          tenant: { id: tenantId }
+        },
+        relations: { category: true },
+      });
+      if (!group) break;
+      if (group.category?.name === 'FOB') {
+        fobGroupId = group.id;
+        break;
+      }
+      currentId = group.parentId ?? null;
+    }
+
+    const memberships = await membershipRepository
+      .createQueryBuilder('membership')
+      .innerJoin('membership.group', 'group')
+      .where('group.tenantId = :tenantId', { tenantId })
+      .andWhere('membership.isActive = true')
+      .andWhere(
+        fobGroupId
+          ? '(membership.groupId = :groupId OR (membership.groupId = :fobGroupId AND membership.role = :leaderRole))'
+          : 'membership.groupId = :groupId',
+        { groupId, fobGroupId, leaderRole: GroupRole.Leader },
+      )
+      .select(['membership.contactId'])
+      .getMany();
+      
+    const contactIds = [...new Set(memberships.map((m) => m.contactId))];
+    if (contactIds.length === 0) return [];
+    
+    const data = await this.repository.find({
+      relations: ['contact', 'contact.person', 'userRoles', 'userRoles.roles'],
+      where: { contactId: In(contactIds), tenant: { id: tenantId } },
+    });
+    return data.map((it) => this.toListModel(it));
   }
 
   async findByName(username: string): Promise<User | undefined> {

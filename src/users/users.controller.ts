@@ -33,6 +33,12 @@ export class UsersController {
   async findAll(@Query() req: SearchDto): Promise<UserListDto[]> {
     return this.service.findAll(req);
   }
+  @Get('by-location/:groupId')
+  async findByLocationGroup(
+    @Param('groupId', ParseIntPipe) groupId: number,
+  ): Promise<UserListDto[]> {
+    return this.service.findUsersInGroup(groupId);
+  }
 
   @Post()
   async create(@Body() data: CreateUserDto): Promise<UserListDto> {
