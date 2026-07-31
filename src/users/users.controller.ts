@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
   UseInterceptors,
+  Request,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import SearchDto from '../shared/dto/search.dto';
@@ -32,6 +33,13 @@ export class UsersController {
   @Get()
   async findAll(@Query() req: SearchDto): Promise<UserListDto[]> {
     return this.service.findAll(req);
+  }
+  @Get('by-location/:groupId')
+  async findByLocationGroup(
+    @Param('groupId', ParseIntPipe) groupId: number,
+    @Request() rawRequest: any,
+  ): Promise<UserListDto[]> {
+    return this.service.findUsersInGroup(groupId, rawRequest.user);
   }
 
   @Post()

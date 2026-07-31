@@ -29,6 +29,23 @@ describe('Users Controller', () => {
         isActive: false,
       };
     }),
+    findUsersInGroup: jest.fn((groupId, user) => {
+      return [
+        {
+          id: 1,
+          username: 'memberone@test.com',
+          fullName: 'Member One',
+          contactId: 1,
+          contact: {
+            id: 1,
+            name: 'Member One',
+          },
+          avatar: null,
+          roles: ['USER_VIEW'],
+          isActive: true,
+        },
+      ];
+    }),
   };
 
   beforeEach(async () => {
@@ -88,6 +105,29 @@ describe('Users Controller', () => {
     });
     result.roles.forEach((it) => {
       expect(it).toEqual(expect.any(String));
+    });
+  });
+
+  it('should list the users belonging to a location group', async () => {
+    const groupId = 42;
+    const rawRequest = { user: { id: 1 }, headers: {} };
+
+    const result = await controller.findByLocationGroup(groupId, rawRequest);
+
+    expect(mockUsersService.findUsersInGroup).toHaveBeenCalledWith(
+      groupId,
+      rawRequest.user,
+    );
+    expect(result).toHaveLength(1);
+    result.forEach((it) => {
+      expect(it).toMatchObject({
+        id: expect.any(Number),
+        username: expect.any(String),
+        fullName: expect.any(String),
+        contactId: expect.any(Number),
+        roles: expect.any(Array),
+        isActive: expect.any(Boolean),
+      });
     });
   });
 });
