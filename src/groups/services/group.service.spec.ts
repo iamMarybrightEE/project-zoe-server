@@ -15,6 +15,13 @@ import GroupCategory from '../entities/groupCategory.entity';
 import Phone from '../../crm/entities/phone.entity';
 import { FellowshipSchedule } from '../../attendance/entities/fellowship-schedule.entity';
 
+let tenantAwareGroupRepoForTest: any;
+jest.mock('../../shared/repository/tenant-aware.repository', () => ({
+  TenantAwareRepository: jest
+    .fn()
+    .mockImplementation(() => tenantAwareGroupRepoForTest),
+}));
+
 describe('GroupsService', () => {
   let service: GroupsService;
   let mockRepositories: any;
@@ -23,6 +30,7 @@ describe('GroupsService', () => {
   let mockGoogleService: Partial<GoogleService>;
   let mockAfricasTalkingService: Partial<AfricasTalkingService>;
   let mockTenantContext: Partial<TenantContext>;
+  let mockTenantAwareGroupRepo: any;
 
   beforeEach(async () => {
     mockRepositories = {
@@ -84,6 +92,11 @@ describe('GroupsService', () => {
       requireTenant: jest.fn().mockReturnValue(1),
       tenantId: 1,
     } as any;
+
+    mockTenantAwareGroupRepo = {
+      findOne: jest.fn(),
+    };
+    tenantAwareGroupRepoForTest = mockTenantAwareGroupRepo;
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -352,29 +365,58 @@ describe('GroupsService', () => {
   });
 
   describe('getContactLocationGroup', () => {
-    it('returns null when the contact has no location group', async () => {
+    const requestingUser = { id: 1 };
+
+    it('returns null when the contact has no location group, without checking permissions', async () => {
       mockGroupsPermissionsService.getContactLocationGroupId.mockResolvedValueOnce(
         null,
       );
 
-      const result = await service.getContactLocationGroup(5);
+      const result = await service.getContactLocationGroup(5, requestingUser);
 
       expect(result).toBeNull();
-      expect(mockRepositories.group.findOne).not.toHaveBeenCalled();
+      expect(
+        mockGroupsPermissionsService.hasPermissionForGroup,
+      ).not.toHaveBeenCalled();
+      expect(mockTenantAwareGroupRepo.findOne).not.toHaveBeenCalled();
     });
 
-    it('returns the id/name of the resolved location group', async () => {
+    it('throws when the requesting user lacks permission for the resolved location group', async () => {
       mockGroupsPermissionsService.getContactLocationGroupId.mockResolvedValueOnce(
         3,
       );
-      mockRepositories.group.findOne.mockResolvedValueOnce({
+      mockGroupsPermissionsService.hasPermissionForGroup.mockResolvedValueOnce(
+        false,
+      );
+
+      await expect(
+        service.getContactLocationGroup(5, requestingUser),
+      ).rejects.toThrow(ClientFriendlyException);
+      expect(
+        mockGroupsPermissionsService.hasPermissionForGroup,
+      ).toHaveBeenCalledWith(requestingUser, 3);
+      expect(mockTenantAwareGroupRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it('returns the id/name of the resolved location group when the user has access', async () => {
+      mockGroupsPermissionsService.getContactLocationGroupId.mockResolvedValueOnce(
+        3,
+      );
+      mockGroupsPermissionsService.hasPermissionForGroup.mockResolvedValueOnce(
+        true,
+      );
+      mockTenantAwareGroupRepo.findOne.mockResolvedValueOnce({
         id: 3,
         name: 'Downtown',
       });
 
-      const result = await service.getContactLocationGroup(5);
+      const result = await service.getContactLocationGroup(5, requestingUser);
 
       expect(result).toEqual({ id: 3, name: 'Downtown' });
+      expect(mockTenantAwareGroupRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 3 },
+        select: ['id', 'name'],
+      });
     });
   });
 

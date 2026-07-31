@@ -29,7 +29,7 @@ describe('Users Controller', () => {
         isActive: false,
       };
     }),
-    findUsersInGroup: jest.fn((groupId) => {
+    findUsersInGroup: jest.fn((groupId, user) => {
       return [
         {
           id: 1,
@@ -110,10 +110,14 @@ describe('Users Controller', () => {
 
   it('should list the users belonging to a location group', async () => {
     const groupId = 42;
+    const rawRequest = { user: { id: 1 }, headers: {} };
 
-    const result = await controller.findByLocationGroup(groupId);
+    const result = await controller.findByLocationGroup(groupId, rawRequest);
 
-    expect(mockUsersService.findUsersInGroup).toHaveBeenCalledWith(groupId);
+    expect(mockUsersService.findUsersInGroup).toHaveBeenCalledWith(
+      groupId,
+      rawRequest.user,
+    );
     expect(result).toHaveLength(1);
     result.forEach((it) => {
       expect(it).toMatchObject({

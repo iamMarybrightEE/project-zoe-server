@@ -4,6 +4,7 @@ import { GroupPrivacy } from '../enums/groupPrivacy';
 import { GroupsService } from '../services/groups.service';
 import { GroupController } from './group.controller';
 import { UsersService } from '../../users/users.service';
+import ClientFriendlyException from '../../shared/exceptions/client-friendly.exception';
 
 describe('GroupController', () => {
   let controller: GroupController;
@@ -78,7 +79,10 @@ describe('GroupController', () => {
       };
     }),
     getContactLocationGroup: jest.fn(
-      async (contactId: number): Promise<{ id: number; name: string } | null> => {
+      async (
+        contactId: number,
+        user: any,
+      ): Promise<{ id: number; name: string } | null> => {
         return { id: 7, name: 'Downtown' };
       },
     ),
@@ -298,20 +302,34 @@ describe('GroupController', () => {
 
   describe('getContactLocationGroup (/contact-location/:contactId)', () => {
     it('returns the location group for a contact', async () => {
-      const result = await controller.getContactLocationGroup(12);
+      const rawRequest = { user: { id: 1 }, headers: {} };
+      const result = await controller.getContactLocationGroup(12, rawRequest);
 
       expect(mockGroupService.getContactLocationGroup).toHaveBeenCalledWith(
         12,
+        rawRequest.user,
       );
       expect(result).toEqual({ id: expect.any(Number), name: expect.any(String) });
     });
 
     it('returns null when the service finds no location group', async () => {
+      const rawRequest = { user: { id: 1 }, headers: {} };
       mockGroupService.getContactLocationGroup.mockResolvedValueOnce(null);
 
-      const result = await controller.getContactLocationGroup(13);
+      const result = await controller.getContactLocationGroup(13, rawRequest);
 
       expect(result).toBeNull();
+    });
+
+    it('propagates an access-denied error from the service', async () => {
+      const rawRequest = { user: { id: 1 }, headers: {} };
+      mockGroupService.getContactLocationGroup.mockRejectedValueOnce(
+        new ClientFriendlyException('Access denied to this location group'),
+      );
+
+      await expect(
+        controller.getContactLocationGroup(14, rawRequest),
+      ).rejects.toThrow(ClientFriendlyException);
     });
   });
 });

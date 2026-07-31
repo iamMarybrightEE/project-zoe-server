@@ -40,6 +40,7 @@ import {
 } from '@nestjs/common';
 import { Tenant } from 'src/tenants/entities/tenant.entity';
 import { FellowshipSchedule } from '../../attendance/entities/fellowship-schedule.entity';
+import { TenantAwareRepository } from '../../shared/repository/tenant-aware.repository';
 
 @Injectable()
 export class GroupsService {
@@ -50,6 +51,7 @@ export class GroupsService {
   private readonly groupCategoryRepository: Repository<GroupCategory>;
   private readonly phoneRepository: Repository<Phone>;
   private readonly fellowshipScheduleRepository: Repository<FellowshipSchedule>;
+  private readonly tenantAwareGroupRepository: TenantAwareRepository<Group>;
   private readonly logger: ContextLogger;
 
   constructor(
@@ -68,6 +70,11 @@ export class GroupsService {
     this.phoneRepository = dataSource.getRepository(Phone);
     this.fellowshipScheduleRepository =
       dataSource.getRepository(FellowshipSchedule);
+    this.tenantAwareGroupRepository = new TenantAwareRepository(
+      Group,
+      dataSource.manager,
+      tenantContext,
+    );
     this.logger = this.appLogger.createContextLogger('GroupsService');
   }
 
@@ -1194,18 +1201,29 @@ export class GroupsService {
       skippedCount: skippedCount + result.failedCount,
     };
   }
+
   async getContactLocationGroup(
     contactId: number,
+    user: any,
   ): Promise<{ id: number; name: string } | null> {
     const groupId =
       await this.groupsPermissionsService.getContactLocationGroupId(contactId);
     if (groupId === null) {
       return null;
     }
-    const tenantId = this.tenantContext.requireTenant();
-    const group = await this.repository.findOne({
-      where: { id: groupId, tenant: { id: tenantId } },
+    const hasAccess = await this.groupsPermissionsService.hasPermissionForGroup(
+      user,
+      groupId,
+    );
+    if (!hasAccess) {
+      throw new ClientFriendlyException(
+        'Access denied to this location group',
+      );
+    }
+    const group = await this.tenantAwareGroupRepository.findOne({
+      where: { id: groupId },
       select: ['id', 'name'],
-    });    return group ? { id: group.id, name: group.name } : null;
+    });
+    return group ? { id: group.id, name: group.name } : null;
   }
 }

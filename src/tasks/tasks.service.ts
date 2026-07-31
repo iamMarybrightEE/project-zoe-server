@@ -290,7 +290,7 @@ export class TasksService {
     return tasksWithLocationGroups;
   }
 
-  async findOne(taskId: number, user: any): Promise<Task> {
+  async findOne(taskId: number, user: any): Promise<TaskWithLocationGroup> {
     const tenantId = this.tenantContext.requireTenant();
     const task = await this.taskRepository.findOne({
       where: { id: taskId, tenant: { id: tenantId } },

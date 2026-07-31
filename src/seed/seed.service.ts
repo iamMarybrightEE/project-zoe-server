@@ -56,6 +56,7 @@ export class SeedService {
       jwtHelperservice,
       groupMembershipService,
       mockTenantContext,
+      groupsPermissionsService,
     );
 
     this.groupsService = new GroupsService(
