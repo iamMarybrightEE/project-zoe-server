@@ -30,9 +30,8 @@ import { GroupRole } from '../groups/enums/groupRole';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { Tenant } from '../tenants/entities/tenant.entity';
 import GroupMembership from '../groups/entities/groupMembership.entity';
-import Group from '../groups/entities/group.entity';
 import { GroupPermissionsService } from '../groups/services/group-permissions.service';
-import { TenantAwareRepository } from '../shared/repository/tenant-aware.repository';
+import { GroupRepository } from '../shared/repository/group.repository';
 
 @Injectable()
 export class UsersService {
@@ -43,7 +42,7 @@ export class UsersService {
   private readonly personRepository: Repository<Person>;
   // Tenant-scoped: findNearestFobAncestor relies on this auto-applying the
   // tenant filter instead of every call site re-supplying `tenant: { id }`.
-  private readonly groupRepository: TenantAwareRepository<Group>;
+  private readonly groupRepository: GroupRepository;
   // GroupMembership has no direct tenant column (it's scoped via its
   // `group` relation), so this stays a plain repository with an explicit
   // `group.tenantId` join filter, matching TasksService's convention.
@@ -62,11 +61,7 @@ export class UsersService {
     this.rolesRepository = connection.getRepository(Roles);
     this.userRolesRepository = connection.getRepository(UserRoles);
     this.personRepository = connection.getRepository(Person);
-    this.groupRepository = new TenantAwareRepository(
-      Group,
-      connection.manager,
-      tenantContext,
-    );
+    this.groupRepository = new GroupRepository(connection.manager, tenantContext);
     this.membershipRepository = connection.getRepository(GroupMembership);
   }
 

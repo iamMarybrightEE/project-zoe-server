@@ -40,7 +40,7 @@ import {
 } from '@nestjs/common';
 import { Tenant } from 'src/tenants/entities/tenant.entity';
 import { FellowshipSchedule } from '../../attendance/entities/fellowship-schedule.entity';
-import { TenantAwareRepository } from '../../shared/repository/tenant-aware.repository';
+import { GroupRepository } from '../../shared/repository/group.repository';
 
 @Injectable()
 export class GroupsService {
@@ -51,7 +51,9 @@ export class GroupsService {
   private readonly groupCategoryRepository: Repository<GroupCategory>;
   private readonly phoneRepository: Repository<Phone>;
   private readonly fellowshipScheduleRepository: Repository<FellowshipSchedule>;
-  private readonly tenantAwareGroupRepository: TenantAwareRepository<Group>;
+  // Tenant-scoped lookups (e.g. getContactLocationGroup) go through this
+  // instead of hand-rolling `tenant: { id: tenantId }` at each call site.
+  private readonly tenantAwareGroupRepository: GroupRepository;
   private readonly logger: ContextLogger;
 
   constructor(
@@ -70,8 +72,7 @@ export class GroupsService {
     this.phoneRepository = dataSource.getRepository(Phone);
     this.fellowshipScheduleRepository =
       dataSource.getRepository(FellowshipSchedule);
-    this.tenantAwareGroupRepository = new TenantAwareRepository(
-      Group,
+    this.tenantAwareGroupRepository = new GroupRepository(
       dataSource.manager,
       tenantContext,
     );
@@ -1202,6 +1203,11 @@ export class GroupsService {
     };
   }
 
+  /**
+   * Resolves the location group for a contact. Requires the caller to have
+   * permission for that location group — without this check, any
+   * authenticated tenant user could resolve another contact's location.
+   */
   async getContactLocationGroup(
     contactId: number,
     user: any,
@@ -1211,6 +1217,7 @@ export class GroupsService {
     if (groupId === null) {
       return null;
     }
+
     const hasAccess = await this.groupsPermissionsService.hasPermissionForGroup(
       user,
       groupId,
@@ -1220,6 +1227,7 @@ export class GroupsService {
         'Access denied to this location group',
       );
     }
+
     const group = await this.tenantAwareGroupRepository.findOne({
       where: { id: groupId },
       select: ['id', 'name'],
