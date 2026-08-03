@@ -56,6 +56,7 @@ export class ReportsService {
   private readonly treeRepository: TreeRepository<Group>;
   private readonly contactRepository: Repository<Contact>;
   private readonly logger: ContextLogger;
+  private static readonly MCA_FIELD_LABELS = ['MC Attendance', 'How many attended MC?'];
 
   constructor(
     @Inject('CONNECTION') connection: Connection,
@@ -1668,5 +1669,104 @@ export class ReportsService {
       });
       return [];
     }
+  }
+  
+  async getWeeklyMcaSummary(user: UserDto): Promise<{
+    total: number;
+    breakdown: { groupId: number; groupName: string; total: number }[];
+    weekStart: string;
+    weekEnd: string;
+    reportFound: boolean;
+  }> {
+    const tenantId = this.tenantContext.requireTenant();
+    const weekStart = this.getStartOfWeek(new Date());
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+
+    const emptyResult = {
+      total: 0,
+      breakdown: [] as { groupId: number; groupName: string; total: number }[],
+      weekStart: weekStart.toISOString().slice(0, 10),
+      weekEnd: weekEnd.toISOString().slice(0, 10),
+    };
+
+    const attendanceFields = await this.reportFieldRepository
+      .createQueryBuilder('field')
+      .innerJoinAndSelect('field.report', 'report')
+      .where('LOWER(field.label) IN (:...labels)', {
+        labels: ReportsService.MCA_FIELD_LABELS.map((l) => l.toLowerCase()),
+      })
+      .andWhere('report.status = :status', { status: ReportStatus.ACTIVE })
+      .andWhere('report.tenant = :tenantId', { tenantId })
+      .getMany();
+
+    if (attendanceFields.length === 0) {
+      this.logger.business(
+        'warn',
+        'No MCA fields found for tenant; skipping weekly summary',
+        {
+          operation: 'getWeeklyMcaSummary',
+          metadata: { tenantId, labelsSearched: ReportsService.MCA_FIELD_LABELS },
+        },
+      );
+      return { ...emptyResult, reportFound: false };
+    }
+
+    const groupIds = await this.getUserManageableGroups(user);
+    if (groupIds.length === 0) {
+      return { ...emptyResult, reportFound: true };
+    }
+
+    const fieldIds = attendanceFields.map((f) => f.id);
+    const fieldIdSet = new Set(fieldIds);
+    const reportIds = Array.from(new Set(attendanceFields.map((f) => f.report.id)));
+
+    const submissions = await this.reportSubmissionRepository
+      .createQueryBuilder('submission')
+      .innerJoinAndSelect('submission.group', 'group')
+      .innerJoinAndSelect('submission.submissionData', 'submissionData')
+      .leftJoinAndSelect('submissionData.reportField', 'reportField')
+      .where('submission.report IN (:...reportIds)', { reportIds })
+      .andWhere('group.id IN (:...groupIds)', { groupIds })
+      .andWhere('submission.submittedAt BETWEEN :weekStart AND :weekEnd', {
+        weekStart,
+        weekEnd,
+      })
+      .getMany();
+
+    let total = 0;
+    const breakdownMap = new Map<number,{ groupId: number; groupName: string; total: number }>();
+
+    for (const submission of submissions) {
+      for (const sd of submission.submissionData) {
+        const fieldId = sd.reportField.id;
+        if (!fieldIdSet.has(fieldId)) continue;
+        const raw = sd.fieldValue;
+        const num = typeof raw === 'number' ? raw : parseFloat(String(raw));
+        if (!Number.isFinite(num)) continue;
+
+        total += num;
+        const group = submission.group;
+        const existing = breakdownMap.get(group.id);
+        if (existing) {
+          existing.total += num;
+        } else {
+          breakdownMap.set(group.id, {
+            groupId: group.id,
+            groupName: group.name,
+            total: num,
+          });
+        }
+      }
+    }
+    return {
+      total,
+      breakdown: Array.from(breakdownMap.values()).sort(
+        (a, b) => b.total - a.total,
+      ),
+      weekStart: emptyResult.weekStart,
+      weekEnd: emptyResult.weekEnd,
+      reportFound: true,
+    };
   }
 }

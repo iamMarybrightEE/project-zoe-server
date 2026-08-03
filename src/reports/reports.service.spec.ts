@@ -53,6 +53,7 @@ describe('ReportsService', () => {
         findOne: jest.fn(),
         save: jest.fn(),
         create: jest.fn(),
+        createQueryBuilder: jest.fn(), 
       },
       reportSubmissionData: {
         find: jest.fn(),
@@ -64,6 +65,7 @@ describe('ReportsService', () => {
       reportField: {
         save: jest.fn(),
         find: jest.fn(),
+        createQueryBuilder: jest.fn(), 
       },
       groupMembership: {
         find: jest.fn(),
@@ -622,58 +624,238 @@ describe('ReportsService', () => {
     });
   });
   describe('Report Submission Notifications (dispatch)', () => {
-    const baseReportWithGroup = {
-      id: 1,
-      name: 'Weekly Report',
-      status: ReportStatus.ACTIVE,
-      groupFieldName: 'groupId', // needed so selectedGroupId resolves from data.groupId
-      targetGroupCategory: undefined,
-      fields: [],
-    } as unknown as Report;
+  const baseReportWithGroup = {
+    id: 1,
+    name: 'Weekly Report',
+    status: ReportStatus.ACTIVE,
+    groupFieldName: 'groupId', // needed so selectedGroupId resolves from data.groupId
+    targetGroupCategory: undefined,
+    fields: [],
+  } as unknown as Report;
 
-    const mockTargetGroup = { id: 10, name: 'MC Nairobi', parentId: undefined } as Group;
+  const mockTargetGroup = { id: 10, name: 'MC Nairobi', parentId: undefined } as Group;
 
-    it('dispatches a notification per resolved recipient and tolerates individual failures', async () => {
-      (mockNotificationsService.create as jest.Mock).mockClear();
+  const reportId = 1;
+  const submittingUser = { id: 7, contactId: 3 } as any;
 
-      const reportId = 1;
-      const submittingUser = { id: 7, contactId: 3 } as any;
+  beforeEach(() => {
+    (mockNotificationsService.create as jest.Mock).mockClear();
 
-      mockRepositories.report.findOne.mockResolvedValue(baseReportWithGroup);
-      mockRepositories.user.findOne.mockResolvedValue({ id: 7, contactId: 3, username: 'shepherd@example.com' });
-      mockRepositories.groupMembership.findOne.mockResolvedValue({ group: { id: 10, category: undefined } });
-      mockGroupPermissionsService.hasPermissionForGroup = jest.fn().mockResolvedValue(true);
-      mockRepositories.groupTree.findOne.mockResolvedValue(mockTargetGroup);
-      mockRepositories.reportSubmission.findOne.mockResolvedValue(null);
-      mockRepositories.reportSubmission.save.mockImplementation((sub: any) =>
-        Promise.resolve({ id: 99, ...sub }),
+    mockRepositories.report.findOne.mockResolvedValue(baseReportWithGroup);
+    mockRepositories.user.findOne.mockResolvedValue({ id: 7, contactId: 3, username: 'shepherd@example.com' });
+    mockRepositories.groupMembership.findOne.mockResolvedValue({ group: { id: 10, category: undefined } });
+    mockGroupPermissionsService.hasPermissionForGroup = jest.fn().mockResolvedValue(true);
+    mockRepositories.groupTree.findOne.mockResolvedValue(mockTargetGroup);
+    mockRepositories.reportSubmission.findOne.mockResolvedValue(null);
+    mockRepositories.reportSubmission.save.mockImplementation((sub: any) =>
+      Promise.resolve({ id: 99, ...sub }),
+    );
+    mockRepositories.reportField.find.mockResolvedValue([{ name: 'groupId' }]);
+
+    jest
+      .spyOn(service as any, 'resolveReportSubmissionRecipients')
+      .mockResolvedValue([10, 11]);
+  });
+
+  it('dispatches a notification per resolved recipient and tolerates individual failures', async () => {
+    await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
+
+    expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
+    expect(mockNotificationsService.create).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 10, type: 'report_submitted' }),
+    );
+    expect(mockNotificationsService.create).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 11, type: 'report_submitted' }),
+    );
+  });
+
+  it('still resolves the submission when one notification dispatch fails', async () => {
+    (mockNotificationsService.create as jest.Mock).mockImplementation(
+      ({ userId }: any) =>
+        userId === 10
+          ? Promise.reject(new Error('Realtime push failed'))
+          : Promise.resolve({}),
+    );
+    const result = await service.submitReport(
+      reportId,
+      { data: { groupId: '10' } },
+      submittingUser,
+    );
+    expect(result).toBeDefined();
+    expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
+  });
+});
+  describe('getWeeklyMcaSummary', () => {
+    const mockUser = { id: 7, contactId: 3 } as any;
+    const makeQueryBuilder = (
+      result: any,
+      terminator: 'getOne' | 'getMany' = 'getMany',
+    ) => {
+      const qb: any = {
+        innerJoinAndSelect: jest.fn().mockReturnThis(),
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn(),
+        getMany: jest.fn(),
+      };
+      qb[terminator].mockResolvedValue(result);
+      return qb;
+    };
+
+    it('returns reportFound: false when no MCA-labelled field exists for the tenant', async () => {
+      const fieldQb = makeQueryBuilder([]);
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(fieldQb);
+
+      const result = await service.getWeeklyMcaSummary(mockUser);
+
+      expect(result.reportFound).toBe(false);
+      expect(result.total).toBe(0);
+      expect(result.breakdown).toEqual([]);
+       // The field lookup must be scoped to the current tenant.
+      const tenantScoped = [
+        ...fieldQb.where.mock.calls,
+        ...fieldQb.andWhere.mock.calls,
+      ].some(([, params]) => params?.tenantId === mockTenantContext.tenantId);
+      expect(tenantScoped).toBe(true);
+      // Should short-circuit before ever resolving manageable groups.
+      expect(mockRepositories.groupMembership.find).not.toHaveBeenCalled();
+    });
+
+    it('returns zero total when the MCA field exists but user manages no groups', async () => {
+      const field = { id: 1, label: 'MC Attendance', report: { id: 100 } };
+      const fieldQb = makeQueryBuilder([field]);
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(fieldQb);
+      mockRepositories.groupMembership.find.mockResolvedValue([]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([]);
+
+      const result = await service.getWeeklyMcaSummary(mockUser);
+
+      expect(result.reportFound).toBe(true);
+      expect(result.total).toBe(0);
+      expect(result.breakdown).toEqual([]);
+      // Should short-circuit before ever querying submissions.
+      expect(mockRepositories.reportSubmission.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('matches both known MCA field labels and sums across groups the user manages', async () => {
+      const fieldA = { id: 1, label: 'MC Attendance', report: { id: 100 } };
+      const fieldB = { id: 2, label: 'How many attended MC?', report: { id: 200 } };
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder([fieldA, fieldB]),
       );
-      mockRepositories.reportField.find.mockResolvedValue([{ name: 'groupId' }]);
 
-      jest
-        .spyOn(service as any, 'resolveReportSubmissionRecipients')
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
         .mockResolvedValue([10, 11]);
 
-      await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
-
-      expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
-      expect(mockNotificationsService.create).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 10, type: 'report_submitted' }),
+      const submissions = [
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [{ reportField: { id: 1 }, fieldValue: '15' }],
+        },
+        {
+          group: { id: 11, name: 'MC Kampala' },
+          submissionData: [{ reportField: { id: 2 }, fieldValue: '20' }],
+        },
+      ];
+      mockRepositories.reportSubmission.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder(submissions),
       );
-      expect(mockNotificationsService.create).toHaveBeenCalledWith(
-        expect.objectContaining({ userId: 11, type: 'report_submitted' }),
+
+      const result = await service.getWeeklyMcaSummary(mockUser);
+
+      expect(result.reportFound).toBe(true);
+      expect(result.total).toBe(35);
+      expect(result.breakdown).toEqual(
+        expect.arrayContaining([
+          { groupId: 10, groupName: 'MC Nairobi', total: 15 },
+          { groupId: 11, groupName: 'MC Kampala', total: 20 },
+        ]),
+      );
+    });
+
+    it('aggregates multiple submissions for the same group into a single breakdown entry (roll-up scenario)', async () => {
+      const field = { id: 1, label: 'MC Attendance', report: { id: 100 } };
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder([field]),
+      );
+      // A zonal-level leader managing several MCs that all report into the same group.
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 1 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10, 11, 12]);
+
+      const submissions = [
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [{ reportField: { id: 1 }, fieldValue: '10' }],
+        },
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [{ reportField: { id: 1 }, fieldValue: '5' }],
+        },
+      ];
+      mockRepositories.reportSubmission.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder(submissions),
       );
 
-      (mockNotificationsService.create as jest.Mock).mockClear();
-      (mockNotificationsService.create as jest.Mock).mockRejectedValueOnce(
-        new Error('Realtime push failed'),
+      const result = await service.getWeeklyMcaSummary(mockUser);
+
+      expect(result.total).toBe(15);
+      expect(result.breakdown).toEqual([
+        { groupId: 10, groupName: 'MC Nairobi', total: 15 },
+      ]);
+    });
+
+    it('skips non-numeric field values without throwing or affecting the total', async () => {
+      const field = { id: 1, label: 'MC Attendance', report: { id: 100 } };
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder([field]),
       );
-      (mockNotificationsService.create as jest.Mock).mockResolvedValueOnce(undefined);
-
-      const result = await service.submitReport(reportId, { data: { groupId: '10' } }, submittingUser);
-
-      expect(result).toBeDefined();
-      expect(mockNotificationsService.create).toHaveBeenCalledTimes(2);
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10]);
+      const submissions = [
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [{ reportField: { id: 1 }, fieldValue: 'N/A' }],
+        },
+      ];
+      mockRepositories.reportSubmission.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder(submissions),
+      );
+      const result = await service.getWeeklyMcaSummary(mockUser);
+      expect(result.total).toBe(0);
+      expect(result.breakdown).toEqual([]);
+    });
+    it('ignores submissionData rows whose reportField id is not one of the resolved MCA fields', async () => {
+      const field = { id: 1, label: 'MC Attendance', report: { id: 100 } };
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder([field]),
+      );
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10]);
+      const submissions = [
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [
+            { reportField: { id: 1 }, fieldValue: '8' },
+            { reportField: { id: 99 }, fieldValue: '1000' },
+          ],
+        },
+      ];
+      mockRepositories.reportSubmission.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder(submissions),
+      );
+      const result = await service.getWeeklyMcaSummary(mockUser);
+      expect(result.total).toBe(8);
     });
   });
 });

@@ -122,6 +122,18 @@ export class ReportsController {
     });
   }
 
+  @Get('mca/weekly-summary')
+  async getWeeklyMcaSummary(@Request() request): Promise<any> {
+    this.logger.apiLog('log', 'Get weekly MCA summary request received', {
+      operation: 'getWeeklyMcaSummary',
+      resource: 'reports',
+      metadata: {
+        userId: request.user?.id,
+      },
+    });
+    return await this.reportService.getWeeklyMcaSummary(request.user);
+  }
+  
   @Get('submissions/:id')
   async getSubmissionDetails(
     @Param('id', ParseIntPipe) id: number,
