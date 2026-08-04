@@ -56,7 +56,8 @@ export class ReportsService {
   private readonly treeRepository: TreeRepository<Group>;
   private readonly contactRepository: Repository<Contact>;
   private readonly logger: ContextLogger;
-  private static readonly MCA_FIELD_LABELS = ['MC Attendance', 'How many attended MC?'];
+  private static readonly MCA_REPORT_NAME = 'MC Attendance Report';
+  private static readonly MCA_FIELD_LABEL = 'How many attended MC?';
 
   constructor(
     @Inject('CONNECTION') connection: Connection,
@@ -1680,8 +1681,6 @@ export class ReportsService {
   }> {
     const tenantId = this.tenantContext.requireTenant();
     const weekStart = this.getStartOfWeek(new Date());
-    const weekEndExclusive = new Date(weekStart);
-    weekEndExclusive.setDate(weekEndExclusive.getDate() + 7);
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekEnd.getDate() + 6);
 
@@ -1692,23 +1691,30 @@ export class ReportsService {
       weekEnd: weekEnd.toISOString().slice(0, 10),
     };
 
-    const attendanceFields = await this.reportFieldRepository
+    const attendanceField = await this.reportFieldRepository
       .createQueryBuilder('field')
       .innerJoinAndSelect('field.report', 'report')
-      .where('LOWER(field.label) IN (:...labels)', {
-        labels: ReportsService.MCA_FIELD_LABELS.map((l) => l.toLowerCase()),
+      .where('LOWER(field.label) = LOWER(:label)', {
+        label: ReportsService.MCA_FIELD_LABEL,
+      })
+      .andWhere('LOWER(report.name) = LOWER(:reportName)', {
+        reportName: ReportsService.MCA_REPORT_NAME,
       })
       .andWhere('report.status = :status', { status: ReportStatus.ACTIVE })
       .andWhere('report.tenant = :tenantId', { tenantId })
-      .getMany();
+      .getOne();
 
-    if (attendanceFields.length === 0) {
+    if (!attendanceField) {
       this.logger.business(
         'warn',
-        'No MCA fields found for tenant; skipping weekly summary',
+        'MCA field not found for tenant; skipping weekly summary',
         {
           operation: 'getWeeklyMcaSummary',
-          metadata: { tenantId, labelsSearched: ReportsService.MCA_FIELD_LABELS },
+          metadata: {
+            tenantId,
+            reportName: ReportsService.MCA_REPORT_NAME,
+            fieldLabel: ReportsService.MCA_FIELD_LABEL,
+          },
         },
       );
       return { ...emptyResult, reportFound: false };
@@ -1719,16 +1725,19 @@ export class ReportsService {
       return { ...emptyResult, reportFound: true };
     }
 
-    const fieldIds = attendanceFields.map((f) => f.id);
-    const fieldIdSet = new Set(fieldIds);
-    const reportIds = Array.from(new Set(attendanceFields.map((f) => f.report.id)));
+    const fieldId = attendanceField.id;
+    const reportId = attendanceField.report.id;
 
     const submissions = await this.reportSubmissionRepository
       .createQueryBuilder('submission')
       .innerJoinAndSelect('submission.group', 'group')
-      .innerJoinAndSelect('submission.submissionData', 'submissionData')
-      .leftJoinAndSelect('submissionData.reportField', 'reportField')
-      .where('submission.report IN (:...reportIds)', { reportIds })
+      .innerJoinAndSelect(
+        'submission.submissionData',
+        'submissionData',
+        'submissionData.reportField = :fieldId',
+        { fieldId },
+      )
+      .where('submission.report = :reportId', { reportId })
       .andWhere('group.id IN (:...groupIds)', { groupIds })
       .andWhere('submission.reportingPeriod = :reportingPeriod', {
         reportingPeriod: emptyResult.weekStart,
@@ -1740,8 +1749,6 @@ export class ReportsService {
 
     for (const submission of submissions) {
       for (const sd of submission.submissionData) {
-        const fieldId = sd.reportField.id;
-        if (!fieldIdSet.has(fieldId)) continue;
         const raw = sd.fieldValue;
         const text = String(raw).trim();
         const num = typeof raw === 'number' ? raw : Number(text);
