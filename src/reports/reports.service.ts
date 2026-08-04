@@ -1680,8 +1680,10 @@ export class ReportsService {
   }> {
     const tenantId = this.tenantContext.requireTenant();
     const weekStart = this.getStartOfWeek(new Date());
+    const weekEndExclusive = new Date(weekStart);
+    weekEndExclusive.setDate(weekEndExclusive.getDate() + 7);
     const weekEnd = new Date(weekStart);
-    weekEnd.setDate(weekEnd.getDate() + 7);
+    weekEnd.setDate(weekEnd.getDate() + 6);
 
     const emptyResult = {
       total: 0,
@@ -1728,9 +1730,8 @@ export class ReportsService {
       .leftJoinAndSelect('submissionData.reportField', 'reportField')
       .where('submission.report IN (:...reportIds)', { reportIds })
       .andWhere('group.id IN (:...groupIds)', { groupIds })
-      .andWhere('submission.submittedAt BETWEEN :weekStart AND :weekEnd', {
-        weekStart,
-        weekEnd,
+      .andWhere('submission.reportingPeriod = :reportingPeriod', {
+        reportingPeriod: emptyResult.weekStart,
       })
       .getMany();
 

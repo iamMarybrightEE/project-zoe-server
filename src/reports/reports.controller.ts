@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Header,
   Post,
   Patch,
   Put,
@@ -123,6 +124,7 @@ export class ReportsController {
   }
 
   @Get('mca/weekly-summary')
+  @Header('Cache-Control', 'no-store')
   async getWeeklyMcaSummary(@Request() request): Promise<any> {
     this.logger.apiLog('log', 'Get weekly MCA summary request received', {
       operation: 'getWeeklyMcaSummary',
