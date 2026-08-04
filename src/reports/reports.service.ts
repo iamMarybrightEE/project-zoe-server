@@ -1742,8 +1742,9 @@ export class ReportsService {
         const fieldId = sd.reportField.id;
         if (!fieldIdSet.has(fieldId)) continue;
         const raw = sd.fieldValue;
-        const num = typeof raw === 'number' ? raw : parseFloat(String(raw));
-        if (!Number.isFinite(num)) continue;
+        const text = String(raw).trim();
+        const num = typeof raw === 'number' ? raw : Number(text);
+        if (text === '' || !Number.isFinite(num)) continue;
 
         total += num;
         const group = submission.group;
