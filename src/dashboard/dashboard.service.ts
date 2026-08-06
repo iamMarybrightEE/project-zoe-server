@@ -557,6 +557,9 @@ export class DashboardService {
         try {
           const dob = this.parseDateOnly(person.dateOfBirth);
           if (isNaN(dob.getTime())) {
+            this.logger.warn(
+              `Skipping contact ${contact.id}: unparseable dateOfBirth`,
+            );
             return null;
           }
 
