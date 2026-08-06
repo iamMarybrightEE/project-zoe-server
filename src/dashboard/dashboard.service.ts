@@ -1,5 +1,5 @@
 import { Injectable, Inject, NotFoundException, Logger } from '@nestjs/common';
-import { Between, Connection, In, Repository } from 'typeorm';
+import { Between, Brackets, Connection, In, Repository } from 'typeorm';
 import { ReportSubmission } from '../reports/entities/report.submission.entity';
 import { Report } from '../reports/entities/report.entity';
 import { GroupPermissionsService } from '../groups/services/group-permissions.service';
@@ -397,6 +397,54 @@ export class DashboardService {
     }));
   }
   /**
+ * The (month, day) pairs for today through the next 6 days, used to filter
+ * contacts at the SQL level instead of loading every contact in the tenant.
+ */
+  private getBirthdayWindowDays(today: Date): { month: number; day: number }[] {
+    const days: { month: number; day: number }[] = [];
+    for (let i = 0; i <= 6; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() + i);
+      days.push({ month: d.getMonth() + 1, day: d.getDate() });
+    }
+    return days;
+  }
+  private async findBirthdayWindowContacts(
+    tenantId: number,
+    windowDays: { month: number; day: number }[],
+  ): Promise<Contact[]> {
+    const qb = this.contactRepository
+      .createQueryBuilder('contact')
+      .innerJoinAndSelect('contact.person', 'person')
+      .leftJoinAndSelect('contact.groupMemberships', 'groupMemberships')
+      .leftJoinAndSelect('groupMemberships.group', 'group')
+      .where('contact.tenantId = :tenantId', { tenantId })
+      .andWhere('contact.category = :category', {
+        category: ContactCategory.Person,
+      })
+      .andWhere('person.dateOfBirth IS NOT NULL')
+      .andWhere(
+        new Brackets((qbInner) => {
+          windowDays.forEach((wd, idx) => {
+            const condition = `(EXTRACT(MONTH FROM person."dateOfBirth"::date) = :month${idx} AND EXTRACT(DAY FROM person."dateOfBirth"::date) = :day${idx})`;
+            if (idx === 0) {
+              qbInner.where(condition, {
+                [`month${idx}`]: wd.month,
+                [`day${idx}`]: wd.day,
+              });
+            } else {
+              qbInner.orWhere(condition, {
+                [`month${idx}`]: wd.month,
+                [`day${idx}`]: wd.day,
+              });
+            }
+          });
+        }),
+      );
+
+    return qb.getMany();
+  }
+  /**
    * Build a groupId -> hierarchy entry map for the tenant, so we can walk up
    * from a membership's group to its Location-purpose ancestor (or tenant
    * root) without one query per contact.
@@ -411,7 +459,7 @@ export class DashboardService {
         id: true,
         name: true,
         parentId: true,
-        category: { purpose: true },
+        category: { id: true, purpose: true },
       },
     });
 
@@ -479,7 +527,10 @@ export class DashboardService {
       return UNKNOWN_ROOT_LABEL;
     }
 
-    return roots.map((r) => r.name).join(', ');
+    return roots
+      .map((r) => r.name)
+      .sort((a, b) => a.localeCompare(b))
+      .join(', ');
   }
 
   /**
@@ -514,34 +565,10 @@ export class DashboardService {
     today.setHours(0, 0, 0, 0);
 
     const tenantId = this.tenantContext.requireTenant();
+    const windowDays = this.getBirthdayWindowDays(today);
 
     const [contacts, hierarchy] = await Promise.all([
-      this.contactRepository.find({
-        where: {
-          tenant: { id: tenantId },
-          category: ContactCategory.Person,
-        },
-        relations: ['person', 'groupMemberships', 'groupMemberships.group'],
-        select: {
-          id: true,
-          person: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            dateOfBirth: true,
-          },
-          groupMemberships: {
-            id: true,
-            groupId: true,
-            isActive: true,
-            group: {
-              id: true,
-              name: true,
-              parentId: true,
-            },
-          },
-        },
-      }),
+      this.findBirthdayWindowContacts(tenantId, windowDays),
       this.loadGroupHierarchyMap(tenantId),
     ]);
 
