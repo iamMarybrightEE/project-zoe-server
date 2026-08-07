@@ -22,6 +22,7 @@ import { Repository, Connection } from 'typeorm';
 import { ReportSubmissionDto } from './dto/report-submission.dto';
 import { ReportDto } from './dto/report.dto';
 import { Report } from './entities/report.entity';
+import { type McComplianceResponse } from './reports.service';
 import {
   ApiResponse,
   ReportSubmissionsApiResponse,
@@ -293,6 +294,29 @@ export class ReportsController {
       reportId,
       smallGroupIdList,
       parentGroupIdList,
+    );
+  }
+  
+  @Get('mc/compliance')
+  @Header('Cache-Control', 'no-store')
+  async getMcSubmissionCompliance(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Request() request?: any,
+  ): Promise<McComplianceResponse> {
+    this.logger.apiLog('log', 'Get MC submission compliance request received', {
+      operation: 'getMcSubmissionCompliance',
+      resource: 'reports',
+      metadata: {
+        userId: request.user?.id,
+        from,
+        to,
+      },
+    });
+    return await this.reportService.getMcSubmissionCompliance(
+      request.user,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
     );
   }
 }

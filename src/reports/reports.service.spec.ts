@@ -9,6 +9,7 @@ import { AppLogger } from '../utils/app-logger.service';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { FellowshipAttendanceService } from '../attendance/services/fellowship-attendance.service';
 import { Connection, Repository, TreeRepository } from 'typeorm';
+import Contact from '../crm/entities/contact.entity';
 import { Report } from './entities/report.entity';
 import { ReportStatus } from './enums/report.enum';
 import { ReportSubmission } from './entities/report.submission.entity';
@@ -75,6 +76,10 @@ describe('ReportsService', () => {
         findDescendants: jest.fn(),
         findAncestors: jest.fn(),
         findOne: jest.fn(),
+        find: jest.fn(),
+      },
+      contact: {
+        createQueryBuilder: jest.fn(),
       },
     };
 
@@ -89,6 +94,7 @@ describe('ReportsService', () => {
         if (entity === User) return mockRepositories.user;
         if (entity === ReportField) return mockRepositories.reportField;
         if (entity === GroupMembership) return mockRepositories.groupMembership;
+        if (entity === Contact) return mockRepositories.contact;
         return mockRepositories.report;
       }),
       getTreeRepository: jest.fn().mockReturnValue(mockRepositories.groupTree),
@@ -796,8 +802,8 @@ describe('ReportsService', () => {
         ]),
       );
 
-      // Submission query must be scoped to the single resolved report,
-      // the user's manageable groups, and this week's reportingPeriod.
+      // Submission query must be scoped to the single resolved report and
+      // the user's manageable groups.
       const andWhereCalls = submissionQb.andWhere.mock.calls;
       expect(
         andWhereCalls.some(
@@ -808,9 +814,21 @@ describe('ReportsService', () => {
             params.groupIds.includes(11),
         ),
       ).toBe(true);
+      // Must filter by a submittedAt range (lower bound inclusive, upper bound
+      // exclusive), not the historical reportingPeriod string — this is the
+      // fix that makes the summary immune to any past reportingPeriod-format
+      // drift, since submittedAt is a real timestamp that's never rewritten.
       expect(
-        andWhereCalls.some(([sql, params]) =>
-          sql.includes('reportingPeriod') && typeof params?.reportingPeriod === 'string',
+        andWhereCalls.some(
+          ([sql, params]) =>
+            sql.includes('submittedAt >=') && params?.weekStart instanceof Date,
+        ),
+      ).toBe(true);
+      expect(
+        andWhereCalls.some(
+          ([sql, params]) =>
+            sql.includes('submittedAt <') &&
+            params?.weekEndExclusive instanceof Date,
         ),
       ).toBe(true);
     });
@@ -892,6 +910,270 @@ describe('ReportsService', () => {
       const result = await service.getWeeklyMcaSummary(mockUser);
       expect(result.total).toBe(0);
       expect(result.breakdown).toEqual([]);
+    });
+
+    it('includes a submission whose submittedAt falls on the very last moment of the current week', async () => {
+      // Regression guard for the exclusive-upper-bound fix: a submission at
+      // 23:59:59 on the last day of the reporting week must still count.
+      const field = { id: 1, label: 'How many attended MC?', report: { id: 100 } };
+      mockRepositories.reportField.createQueryBuilder.mockReturnValue(
+        makeQueryBuilder(field, 'getOne'),
+      );
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10]);
+
+      const submissionQb = makeQueryBuilder([
+        {
+          group: { id: 10, name: 'MC Nairobi' },
+          submissionData: [{ reportField: { id: 1 }, fieldValue: '12' }],
+        },
+      ]);
+      mockRepositories.reportSubmission.createQueryBuilder.mockReturnValue(
+        submissionQb,
+      );
+
+      const result = await service.getWeeklyMcaSummary(mockUser);
+
+      expect(result.total).toBe(12);
+      // weekEndExclusive must be strictly after weekEnd (the inclusive display
+      // date), i.e. the start of the following week.
+      const weekStartCall = submissionQb.andWhere.mock.calls.find(([sql]) =>
+        sql.includes('submittedAt >='),
+      );
+      const weekEndCall = submissionQb.andWhere.mock.calls.find(([sql]) =>
+        sql.includes('submittedAt <'),
+      );
+      const daysBetween =
+        (weekEndCall[1].weekEndExclusive.getTime() -
+          weekStartCall[1].weekStart.getTime()) /
+        (1000 * 60 * 60 * 24);
+      expect(daysBetween).toBe(7);
+    });
+  });
+  describe('getMcSubmissionCompliance', () => {
+    const mockUser = { id: 7, contactId: 3 } as any;
+
+    const makeContactQueryBuilder = (rows: any[]) => {
+      const qb: any = {
+        innerJoin: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn().mockResolvedValue(rows),
+      };
+      return qb;
+    };
+
+    beforeEach(() => {
+      mockRepositories.groupTree.find.mockReset();
+      mockRepositories.reportSubmission.find.mockReset();
+      mockRepositories.groupMembership.find.mockReset();
+      mockRepositories.contact.createQueryBuilder.mockReset();
+    });
+
+    it('returns no groups when the user manages no groups (visibility scoping)', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValue([]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([]);
+
+      const result = await service.getMcSubmissionCompliance(mockUser);
+
+      expect(result.groups).toEqual([]);
+      // Must short-circuit before ever looking at MC groups or submissions.
+      expect(mockRepositories.groupTree.find).not.toHaveBeenCalled();
+    });
+
+    it('only queries MC groups within the user-scoped group id list', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([]); // no MC groups found
+
+      await service.getMcSubmissionCompliance(mockUser);
+
+      expect(mockRepositories.groupTree.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: expect.objectContaining({ _value: expect.arrayContaining([10]) }),
+          }),
+        }),
+      );
+    });
+
+    it('returns no groups when the MC Attendance Report does not exist', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValue([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue(null);
+
+      const result = await service.getMcSubmissionCompliance(mockUser);
+
+      expect(result.groups).toEqual([]);
+    });
+
+    it('excludes MC groups that submitted for every week in range', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+
+      const from = new Date('2026-07-26'); // Sunday
+      const to = new Date('2026-08-01');   // same reporting week
+      // submittedAt (not reportingPeriod) is what the service now buckets on —
+      // this timestamp falls within the 2026-07-26 reporting week.
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        {
+          group: { id: 10 },
+          submittedAt: new Date('2026-07-28T09:00:00Z'),
+        },
+      ]);
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([
+        { groupId: 10, contactId: 55 },
+      ]);
+      mockRepositories.contact.createQueryBuilder.mockReturnValue(
+        makeContactQueryBuilder([
+          { id: 55, firstName: 'Grace', lastName: 'Nakato', middleName: null },
+        ]),
+      );
+
+      const result = await service.getMcSubmissionCompliance(mockUser, from, to);
+
+      expect(result.groups).toEqual([]);
+    });
+
+    it('includes only MC groups with at least one missed week, sorted worst-first', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([
+        { groupId: 10 },
+        { groupId: 11 },
+      ]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10, 11]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+        { id: 11, name: 'MC Kampala' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+
+      // Two-week range: 10 submitted both weeks (compliant, excluded),
+      // 11 submitted neither (should appear with weeksMissed = 2).
+      const from = new Date('2026-07-19');
+      const to = new Date('2026-07-26');
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        { group: { id: 10 }, submittedAt: new Date('2026-07-21T10:00:00Z') },
+        { group: { id: 10 }, submittedAt: new Date('2026-07-28T10:00:00Z') },
+      ]);
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([
+        { groupId: 11, contactId: 77 },
+      ]);
+      mockRepositories.contact.createQueryBuilder.mockReturnValue(
+        makeContactQueryBuilder([
+          { id: 77, firstName: 'Brian', lastName: 'Okello', middleName: null },
+        ]),
+      );
+
+      const result = await service.getMcSubmissionCompliance(mockUser, from, to);
+
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]).toMatchObject({
+        groupId: 11,
+        groupName: 'MC Kampala',
+        leaderName: 'Brian Okello',
+        weeksMissed: 2,
+        weeksInRange: 2,
+      });
+    });
+
+    it('flags missingCurrentWeek only when the most recent week is among the missed weeks', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+
+      const from = new Date('2026-07-19');
+      const to = new Date('2026-07-26'); // current week starts 2026-07-26
+      // Submitted the earlier week, missed the current one.
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        { group: { id: 10 }, submittedAt: new Date('2026-07-21T10:00:00Z') },
+      ]);
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([
+        { groupId: 10, contactId: 55 },
+      ]);
+      mockRepositories.contact.createQueryBuilder.mockReturnValue(
+        makeContactQueryBuilder([
+          { id: 55, firstName: 'Grace', lastName: 'Nakato', middleName: null },
+        ]),
+      );
+
+      const result = await service.getMcSubmissionCompliance(mockUser, from, to);
+
+      expect(result.groups[0].missingCurrentWeek).toBe(true);
+      expect(result.groups[0].missedWeeks).toEqual(['2026-07-26']);
+    });
+
+    it('falls back to "No leader assigned" when an MC has no active leader', async () => {
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.reportSubmission.find.mockResolvedValue([]);
+      // No active leader membership found for group 10.
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([]);
+
+      const result = await service.getMcSubmissionCompliance(
+        mockUser,
+        new Date('2026-07-26'),
+        new Date('2026-07-26'),
+      );
+
+      expect(result.groups[0].leaderName).toBe('No leader assigned');
+      expect(mockRepositories.contact.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('buckets a submission by submittedAt even when reportingPeriod is stale or absent', async () => {
+      // Regression guard for the exact bug just fixed: a submission whose
+      // stored reportingPeriod (from an older week-boundary formula) no
+      // longer matches its actual week must still be counted correctly,
+      // because the service now derives the bucket from submittedAt, not
+      // from the stored string.
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([{ groupId: 10 }]);
+      mockGroupTreeService.getGroupAndAllChildren = jest.fn().mockResolvedValue([10]);
+      mockRepositories.groupTree.find.mockResolvedValue([
+        { id: 10, name: 'MC Nairobi' },
+      ]);
+      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+
+      const from = new Date('2026-07-26');
+      const to = new Date('2026-08-01');
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        {
+          group: { id: 10 },
+          submittedAt: new Date('2026-07-29T10:00:00Z'),
+          // Intentionally stale/wrong — must be ignored by the service.
+          reportingPeriod: '1970-01-01',
+        },
+      ]);
+      mockRepositories.groupMembership.find.mockResolvedValueOnce([
+        { groupId: 10, contactId: 55 },
+      ]);
+      mockRepositories.contact.createQueryBuilder.mockReturnValue(
+        makeContactQueryBuilder([
+          { id: 55, firstName: 'Grace', lastName: 'Nakato', middleName: null },
+        ]),
+      );
+
+      const result = await service.getMcSubmissionCompliance(mockUser, from, to);
+
+      // Group 10 submitted (via submittedAt) for the only week in range, so
+      // it must be excluded from the "not submitted" result entirely.
+      expect(result.groups).toEqual([]);
     });
   });
 });
