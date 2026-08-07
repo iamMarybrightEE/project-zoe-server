@@ -53,6 +53,7 @@ describe('TasksService — location-based visibility scoping', () => {
   let membershipQb: any;
   let commentQb: any;
   let mockNotificationsService:any;
+  let consoleErrorSpy: jest.SpyInstance;
 
   const buildUser = (overrides: Record<string, any> = {}) => ({
     id: 100,
@@ -105,6 +106,7 @@ describe('TasksService — location-based visibility scoping', () => {
     // Must be set before module.compile() so the TenantAwareRepository mock
     // returns the current mockGroupRepo when the service is constructed.
     groupRepoForTest = mockGroupRepo;
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const mockConnection: Partial<Connection> = {
       getRepository: jest.fn((entity: any) => {
@@ -146,6 +148,9 @@ describe('TasksService — location-based visibility scoping', () => {
     }).compile();
 
     service = module.get<TasksService>(TasksService);
+  });
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
   });
 
   describe('findAll', () => {
@@ -398,6 +403,11 @@ describe('TasksService — location-based visibility scoping', () => {
           assignedToId: 42,
         } as any),
       ).resolves.toBeDefined();
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to send task-assigned notification:',
+        expect.any(Error),
+      );
     });
   });
 
