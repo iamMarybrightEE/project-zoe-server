@@ -313,10 +313,50 @@ export class ReportsController {
         to,
       },
     });
+    const parsedFrom = this.parseLocalDate(from);
+    const parsedTo = this.parseLocalDate(to);
+
+    if (from && !parsedFrom) {
+      throw new BadRequestException(`Invalid "from" date: ${from}`);
+    }
+    if (to && !parsedTo) {
+      throw new BadRequestException(`Invalid "to" date: ${to}`);
+    }
+    if (parsedFrom && parsedTo && parsedFrom > parsedTo) {
+      throw new BadRequestException('"from" date must not be after "to" date');
+    }
     return await this.reportService.getMcSubmissionCompliance(
       request.user,
-      from ? new Date(from) : undefined,
-      to ? new Date(to) : undefined,
+      parsedFrom ?? undefined,
+      parsedTo ?? undefined,
     );
+  }
+  /**
+   * Parses a 'YYYY-MM-DD' date-only string using local calendar fields,
+   * avoiding the UTC-midnight shift that `new Date('YYYY-MM-DD')` causes
+   * for any timezone west of UTC. Returns undefined for empty/missing
+   * input and null for a malformed or invalid calendar date so callers
+   * can distinguish "not provided" from "bad input".
+   */
+  private parseLocalDate(value?: unknown): Date | undefined | null {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string') return null;    
+    const normalized = value.trim();
+    if (normalized === '') return undefined;    
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);    
+    if (match) {
+        const [, y, m, d] = match;
+        const date = new Date(Number(y), Number(m) - 1, Number(d));
+        if (
+            date.getFullYear() !== Number(y) ||
+            date.getMonth() !== Number(m) - 1 ||
+            date.getDate() !== Number(d)
+        ) {
+            return null;
+        }        
+        return date;
+    } else {
+        return null;
+    }
   }
 }

@@ -33,6 +33,7 @@ import { GroupTreeService } from 'src/groups/services/group-tree.service';
 import { ReportField } from './entities/report.field.entity';
 import { ReportSubmissionData } from './entities/report.submission.data.entity';
 import { GroupCategoryNames } from 'src/groups/enums/groups';
+import { GroupCategoryPurpose } from 'src/groups/enums/groups';
 import GroupMembership from 'src/groups/entities/groupMembership.entity';
 import { GroupRole } from 'src/groups/enums/groupRole';
 import { ReportStatus } from './enums/report.enum';
@@ -1057,10 +1058,12 @@ export class ReportsService {
       return new Map();
     }
 
+    const tenantId = this.tenantContext.requireTenant();
     const contacts = await this.contactRepository
       .createQueryBuilder('c')
       .innerJoin('c.person', 'p')
       .where('c.id IN (:...contactIds)', { contactIds })
+      .andWhere('c.tenantId = :tenantId', { tenantId })
       .select([
         'c.id AS id',
         'p.firstName AS "firstName"',
@@ -1835,7 +1838,7 @@ export class ReportsService {
     const mcGroups = await this.treeRepository.find({
       where: {
         id: In(groupIds),
-        category: { name: GroupCategoryNames.MC } as any,
+        category: { purpose: GroupCategoryPurpose.FELLOWSHIP } as any,
         tenant: { id: tenantId } as any,
       },
       relations: ['category'],
