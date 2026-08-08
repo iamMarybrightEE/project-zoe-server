@@ -5,7 +5,16 @@ import {
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
-import { Connection, Repository, In, Not, Between } from 'typeorm';
+import {
+  Connection,
+  Repository,
+  In,
+  Not,
+  Between,
+  And,
+  MoreThanOrEqual,
+  LessThan,
+} from 'typeorm';
 import { UserDto } from 'src/auth/dto/user.dto';
 import { Report } from './entities/report.entity';
 import { ReportSubmission } from './entities/report.submission.entity';
@@ -33,6 +42,7 @@ import { GroupTreeService } from 'src/groups/services/group-tree.service';
 import { ReportField } from './entities/report.field.entity';
 import { ReportSubmissionData } from './entities/report.submission.data.entity';
 import { GroupCategoryNames } from 'src/groups/enums/groups';
+import { GroupCategoryPurpose } from 'src/groups/enums/groups';
 import GroupMembership from 'src/groups/entities/groupMembership.entity';
 import { GroupRole } from 'src/groups/enums/groupRole';
 import { ReportStatus } from './enums/report.enum';
@@ -44,6 +54,21 @@ import Contact from 'src/crm/entities/contact.entity';
 import { getPersonFullName } from 'src/crm/crm.helpers';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType } from '../notifications/entities/notification.entity';
+
+export interface McComplianceGroupStatus {
+  groupId: number;
+  groupName: string;
+  leaderName: string;
+  weeksInRange: number;
+  weeksMissed: number;
+  missedWeeks: string[]; 
+  missingCurrentWeek: boolean;
+}
+
+export interface McComplianceResponse {
+  weekStarts: string[]; 
+  groups: McComplianceGroupStatus[];
+}
 
 @Injectable()
 export class ReportsService {
@@ -58,6 +83,7 @@ export class ReportsService {
   private readonly logger: ContextLogger;
   private static readonly MCA_REPORT_NAME = 'MC Attendance Report';
   private static readonly MCA_FIELD_LABEL = 'How many attended MC?';
+  private static readonly COMPLIANCE_MAX_WEEKS_LOOKBACK = 12;
 
   constructor(
     @Inject('CONNECTION') connection: Connection,
@@ -138,7 +164,16 @@ export class ReportsService {
 
     return leaderUsers.map((u) => u.id);
   }
-
+  // Formats a Date as YYYY-MM-DD using LOCAL calendar fields. Never use
+  // toISOString().slice(0,10) for reportingPeriod/week-boundary keys — it
+  // converts to UTC and will silently shift the date for any timezone ahead
+  // of UTC (e.g. local midnight can fall on the previous UTC day).
+  private formatDateKey(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
   async createReport(reportDto: ReportDto, user: UserDto): Promise<ReportDto> {
     const report = new Report();
     report.name = reportDto.name;
@@ -349,7 +384,7 @@ export class ReportsService {
     reportSubmission.report = report;
     reportSubmission.submittedAt = new Date();
     reportSubmission.user = submittingUser;
-    reportSubmission.reportingPeriod = weekStart.toISOString().slice(0, 10);
+    reportSubmission.reportingPeriod = this.formatDateKey(weekStart);
     if (targetGroup) {
       reportSubmission.group = targetGroup;
     }
@@ -1025,6 +1060,30 @@ export class ReportsService {
    * Looks up contact names for every dynamic_member_selector field across
    * one or more submissions' submissionData, in a single batched query.
    */
+  private async fetchContactNames(
+    contactIds: number[],
+  ): Promise<Map<number, string>> {
+    if (contactIds.length === 0) {
+      return new Map();
+    }
+
+    const tenantId = this.tenantContext.requireTenant();
+    const contacts = await this.contactRepository
+      .createQueryBuilder('c')
+      .innerJoin('c.person', 'p')
+      .where('c.id IN (:...contactIds)', { contactIds })
+      .andWhere('c.tenantId = :tenantId', { tenantId })
+      .select([
+        'c.id AS id',
+        'p.firstName AS "firstName"',
+        'p.lastName AS "lastName"',
+        'p.middleName AS "middleName"',
+      ])
+      .getRawMany();
+
+    return new Map(contacts.map((c) => [c.id, getPersonFullName(c)]));
+  }
+
   private async fetchMemberSelectorContactNames(
     submissionDataLists: ReportSubmissionData[][],
   ): Promise<Map<number, string>> {
@@ -1041,26 +1100,7 @@ export class ReportsService {
         }
       }
     }
-
-    if (contactIds.size === 0) {
-      return new Map();
-    }
-
-    const contacts = await this.contactRepository
-      .createQueryBuilder('c')
-      .innerJoin('c.person', 'p')
-      .where('c.id IN (:...contactIds)', {
-        contactIds: Array.from(contactIds),
-      })
-      .select([
-        'c.id AS id',
-        'p.firstName AS "firstName"',
-        'p.lastName AS "lastName"',
-        'p.middleName AS "middleName"',
-      ])
-      .getRawMany();
-
-    return new Map(contacts.map((c) => [c.id, getPersonFullName(c)]));
+    return this.fetchContactNames(Array.from(contactIds));
   }
 
   /**
@@ -1673,22 +1713,27 @@ export class ReportsService {
   }
   
   async getWeeklyMcaSummary(user: UserDto): Promise<{
-    total: number;
-    breakdown: { groupId: number; groupName: string; total: number }[];
-    weekStart: string;
-    weekEnd: string;
-    reportFound: boolean;
+  total: number;
+  breakdown: { groupId: number; groupName: string; total: number }[];
+  weekStart: string;
+  weekEnd: string;
+  reportFound: boolean;
   }> {
     const tenantId = this.tenantContext.requireTenant();
     const weekStart = this.getStartOfWeek(new Date());
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekEnd.getDate() + 6);
+    // Exclusive upper bound for the submittedAt query — start of the *next*
+    // week, matching the same Between() pattern submitReport already uses
+    // for its duplicate-submission check.
+    const weekEndExclusive = new Date(weekStart);
+    weekEndExclusive.setDate(weekEndExclusive.getDate() + 7);
 
     const emptyResult = {
       total: 0,
       breakdown: [] as { groupId: number; groupName: string; total: number }[],
-      weekStart: weekStart.toISOString().slice(0, 10),
-      weekEnd: weekEnd.toISOString().slice(0, 10),
+      weekStart: this.formatDateKey(weekStart),
+      weekEnd: this.formatDateKey(weekEnd),
     };
 
     const attendanceField = await this.reportFieldRepository
@@ -1739,13 +1784,12 @@ export class ReportsService {
       )
       .where('submission.report = :reportId', { reportId })
       .andWhere('group.id IN (:...groupIds)', { groupIds })
-      .andWhere('submission.reportingPeriod = :reportingPeriod', {
-        reportingPeriod: emptyResult.weekStart,
-      })
+      .andWhere('submission.submittedAt >= :weekStart', { weekStart })
+      .andWhere('submission.submittedAt < :weekEndExclusive', { weekEndExclusive })
       .getMany();
 
     let total = 0;
-    const breakdownMap = new Map<number,{ groupId: number; groupName: string; total: number }>();
+    const breakdownMap = new Map<number, { groupId: number; groupName: string; total: number }>();
 
     for (const submission of submissions) {
       for (const sd of submission.submissionData) {
@@ -1770,12 +1814,169 @@ export class ReportsService {
     }
     return {
       total,
-      breakdown: Array.from(breakdownMap.values()).sort(
-        (a, b) => b.total - a.total,
-      ),
+      breakdown: Array.from(breakdownMap.values()).sort((a, b) => b.total - a.total),
       weekStart: emptyResult.weekStart,
       weekEnd: emptyResult.weekEnd,
       reportFound: true,
     };
+  }
+ 
+  async getMcSubmissionCompliance(
+    user: UserDto,
+    from?: Date,
+    to?: Date,
+  ): Promise<McComplianceResponse> {
+    const tenantId = this.tenantContext.requireTenant();
+    const rangeEnd = to ?? new Date();
+    const earliestAllowed = this.subtractWeeks(
+      rangeEnd,
+      ReportsService.COMPLIANCE_MAX_WEEKS_LOOKBACK,
+    );
+    const rangeStart =
+      from && from > earliestAllowed ? from : earliestAllowed;
+    const weekStarts = this.getReportingWeekStarts(rangeStart, rangeEnd);
+    if (weekStarts.length === 0) {
+      return { weekStarts: [], groups: [] };
+    }
+    const weekStartIsoList = weekStarts.map((d) => this.formatDateKey(d));
+    const currentWeekIso = weekStartIsoList[weekStartIsoList.length - 1];;
+
+    const groupIds = await this.getUserManageableGroups(user);
+    if (groupIds.length === 0) {
+      return { weekStarts: weekStartIsoList, groups: [] };
+    }
+
+    const mcGroups = await this.treeRepository.find({
+      where: {
+        id: In(groupIds),
+        category: { purpose: GroupCategoryPurpose.FELLOWSHIP } as any,
+        tenant: { id: tenantId } as any,
+      },
+      relations: ['category'],
+    });
+    if (mcGroups.length === 0) {
+      return { weekStarts: weekStartIsoList, groups: [] };
+    }
+    const mcGroupIds = mcGroups.map((g) => g.id);
+
+     const attendanceReport = await this.reportRepository
+      .createQueryBuilder('report')
+      .where('LOWER(report.name) = LOWER(:reportName)', {
+        reportName: ReportsService.MCA_REPORT_NAME,
+      })
+      .andWhere('report.status = :status', { status: ReportStatus.ACTIVE })
+      .andWhere('report.tenant = :tenantId', { tenantId })
+      .getOne();
+    if (!attendanceReport) {
+      return { weekStarts: weekStartIsoList, groups: [] };
+    }
+
+    // Query the raw submittedAt window covering the full range, then bucket
+    // each submission into a week live in JS using the same getStartOfWeek /
+    // formatDateKey as weekStartIsoList above. This deliberately avoids
+    // matching against the stored `reportingPeriod` string — that value was
+    // written under whatever week-boundary formula was live at submit time,
+    // and historical rows can carry a stale value from an earlier formula.
+    // Deriving the bucket from submittedAt at read time keeps this endpoint
+    // permanently in sync with itself, regardless of past formula changes.
+    const queryRangeStart = weekStarts[0];
+    const queryRangeEndExclusive = new Date(weekStarts[weekStarts.length - 1]);
+    queryRangeEndExclusive.setDate(queryRangeEndExclusive.getDate() + 7);
+
+    const submissions = await this.reportSubmissionRepository.find({
+      where: {
+        report: { id: attendanceReport.id },
+        group: { id: In(mcGroupIds) },
+        submittedAt: And(
+          MoreThanOrEqual(queryRangeStart),
+          LessThan(queryRangeEndExclusive),
+        ),
+      },
+      relations: ['group'],
+    });
+
+    const submittedWeeksByGroup = new Map<number, Set<string>>();
+    for (const submission of submissions) {
+      const groupId = submission.group.id;
+      const weekKey = this.formatDateKey(this.getStartOfWeek(submission.submittedAt));
+      if (!submittedWeeksByGroup.has(groupId)) {
+        submittedWeeksByGroup.set(groupId, new Set());
+      }
+      submittedWeeksByGroup.get(groupId).add(weekKey);
+    }
+
+    const leaderNameByGroupId = await this.getMcLeaderNamesByGroupId(mcGroupIds);
+
+    const groups: McComplianceGroupStatus[] = mcGroups
+      .map((group) => {
+        const submittedWeeks = submittedWeeksByGroup.get(group.id) ?? new Set<string>();
+        const missedWeeks = weekStartIsoList.filter((week) => !submittedWeeks.has(week));
+
+        return {
+          groupId: group.id,
+          groupName: group.name,
+          leaderName: leaderNameByGroupId.get(group.id) ?? 'No leader assigned',
+          weeksInRange: weekStartIsoList.length,
+          weeksMissed: missedWeeks.length,
+          missedWeeks,
+          missingCurrentWeek: missedWeeks.includes(currentWeekIso),
+        };
+      })
+      .filter((group) => group.weeksMissed > 0)
+      .sort((a, b) => b.weeksMissed - a.weeksMissed);
+
+    return { weekStarts: weekStartIsoList, groups };
+  }
+
+  private getReportingWeekStarts(from: Date, to: Date): Date[] {
+    const weeks: Date[] = [];
+    let cursor = this.getStartOfWeek(from);
+    const lastWeekStart = this.getStartOfWeek(to);
+
+    while (cursor <= lastWeekStart) {
+      weeks.push(new Date(cursor));
+      cursor = new Date(cursor);
+      cursor.setDate(cursor.getDate() + 7);
+    }
+    return weeks;
+  }
+
+  private subtractWeeks(date: Date, weeks: number): Date {
+    const result = new Date(date);
+    result.setDate(result.getDate() - weeks * 7);
+    return result;
+  }
+
+  private async getMcLeaderNamesByGroupId(
+    groupIds: number[],
+  ): Promise<Map<number, string>> {
+    const leaderMemberships = await this.groupMembershipRepo.find({
+      where: {
+        groupId: In(groupIds),
+        role: GroupRole.Leader,
+        isActive: true,
+        group: { tenant: { id: this.tenantContext.requireTenant() } as any },
+      },
+      order: { groupId: 'ASC', id: 'ASC' },
+    });
+    if (leaderMemberships.length === 0) {
+      return new Map<number, string>();
+    }
+
+    const contactIds = [...new Set(leaderMemberships.map((m) => m.contactId))];
+    const nameByContactId = await this.fetchContactNames(contactIds);
+
+    const leaderNameByGroupId = new Map<number, string>();
+    for (const membership of leaderMemberships) {
+      // A group could have more than one active leader; first one wins —
+      // consistent with how the rest of this file treats "the" MC leader.
+      if (!leaderNameByGroupId.has(membership.groupId)) {
+        leaderNameByGroupId.set(
+          membership.groupId,
+          nameByContactId.get(membership.contactId) ?? 'Unknown leader',
+        );
+      }
+    }
+    return leaderNameByGroupId;
   }
 }
