@@ -5,7 +5,16 @@ import {
   HttpStatus,
   BadRequestException,
 } from '@nestjs/common';
-import { Connection, Repository, In, Not, Between } from 'typeorm';
+import {
+  Connection,
+  Repository,
+  In,
+  Not,
+  Between,
+  And,
+  MoreThanOrEqual,
+  LessThan,
+} from 'typeorm';
 import { UserDto } from 'src/auth/dto/user.dto';
 import { Report } from './entities/report.entity';
 import { ReportSubmission } from './entities/report.submission.entity';
@@ -1819,16 +1828,18 @@ export class ReportsService {
   ): Promise<McComplianceResponse> {
     const tenantId = this.tenantContext.requireTenant();
     const rangeEnd = to ?? new Date();
+    const earliestAllowed = this.subtractWeeks(
+      rangeEnd,
+      ReportsService.COMPLIANCE_MAX_WEEKS_LOOKBACK,
+    );
     const rangeStart =
-      from ??
-      this.subtractWeeks(rangeEnd, ReportsService.COMPLIANCE_MAX_WEEKS_LOOKBACK);
-
+      from && from > earliestAllowed ? from : earliestAllowed;
     const weekStarts = this.getReportingWeekStarts(rangeStart, rangeEnd);
     if (weekStarts.length === 0) {
       return { weekStarts: [], groups: [] };
     }
     const weekStartIsoList = weekStarts.map((d) => this.formatDateKey(d));
-    const currentWeekIso = weekStartIsoList[weekStartIsoList.length - 1];
+    const currentWeekIso = weekStartIsoList[weekStartIsoList.length - 1];;
 
     const groupIds = await this.getUserManageableGroups(user);
     if (groupIds.length === 0) {
@@ -1848,13 +1859,14 @@ export class ReportsService {
     }
     const mcGroupIds = mcGroups.map((g) => g.id);
 
-    const attendanceReport = await this.reportRepository.findOne({
-      where: {
-        name: ReportsService.MCA_REPORT_NAME,
-        status: ReportStatus.ACTIVE,
-        tenant: { id: tenantId } as any,
-      },
-    });
+     const attendanceReport = await this.reportRepository
+      .createQueryBuilder('report')
+      .where('LOWER(report.name) = LOWER(:reportName)', {
+        reportName: ReportsService.MCA_REPORT_NAME,
+      })
+      .andWhere('report.status = :status', { status: ReportStatus.ACTIVE })
+      .andWhere('report.tenant = :tenantId', { tenantId })
+      .getOne();
     if (!attendanceReport) {
       return { weekStarts: weekStartIsoList, groups: [] };
     }
@@ -1875,7 +1887,10 @@ export class ReportsService {
       where: {
         report: { id: attendanceReport.id },
         group: { id: In(mcGroupIds) },
-        submittedAt: Between(queryRangeStart, queryRangeEndExclusive),
+        submittedAt: And(
+          MoreThanOrEqual(queryRangeStart),
+          LessThan(queryRangeEndExclusive),
+        ),
       },
       relations: ['group'],
     });
@@ -1932,7 +1947,9 @@ export class ReportsService {
     return result;
   }
 
-  private async getMcLeaderNamesByGroupId(groupIds: number[]) {
+  private async getMcLeaderNamesByGroupId(
+    groupIds: number[],
+  ): Promise<Map<number, string>> {
     const leaderMemberships = await this.groupMembershipRepo.find({
       where: {
         groupId: In(groupIds),
@@ -1940,9 +1957,10 @@ export class ReportsService {
         isActive: true,
         group: { tenant: { id: this.tenantContext.requireTenant() } as any },
       },
+      order: { groupId: 'ASC', id: 'ASC' },
     });
     if (leaderMemberships.length === 0) {
-      return new Map();
+      return new Map<number, string>();
     }
 
     const contactIds = [...new Set(leaderMemberships.map((m) => m.contactId))];

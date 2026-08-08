@@ -48,6 +48,7 @@ describe('ReportsService', () => {
         create: jest.fn(),
         update: jest.fn(),
         delete: jest.fn(),
+        createQueryBuilder: jest.fn(),
       },
       reportSubmission: {
         find: jest.fn(),
@@ -827,7 +828,7 @@ describe('ReportsService', () => {
       expect(
         andWhereCalls.some(
           ([sql, params]) =>
-            sql.includes('submittedAt <') &&
+            /submittedAt\s*<(?!=)/.test(sql) &&
             params?.weekEndExclusive instanceof Date,
         ),
       ).toBe(true);
@@ -912,9 +913,9 @@ describe('ReportsService', () => {
       expect(result.breakdown).toEqual([]);
     });
 
-    it('includes a submission whose submittedAt falls on the very last moment of the current week', async () => {
-      // Regression guard for the exclusive-upper-bound fix: a submission at
-      // 23:59:59 on the last day of the reporting week must still count.
+    it('computes a 7-day, exclusive-upper-bound submittedAt window', async () => {
+      // Verifies the query window spans exactly 7 days with an exclusive
+      // upper bound (weekEndExclusive is the start of the following week).
       const field = { id: 1, label: 'How many attended MC?', report: { id: 100 } };
       mockRepositories.reportField.createQueryBuilder.mockReturnValue(
         makeQueryBuilder(field, 'getOne'),
@@ -943,7 +944,7 @@ describe('ReportsService', () => {
         sql.includes('submittedAt >='),
       );
       const weekEndCall = submissionQb.andWhere.mock.calls.find(([sql]) =>
-        sql.includes('submittedAt <'),
+        /submittedAt\s*<(?!=)/.test(sql),
       );
       const daysBetween =
         (weekEndCall[1].weekEndExclusive.getTime() -
@@ -965,12 +966,22 @@ describe('ReportsService', () => {
       };
       return qb;
     };
+    const makeReportQueryBuilder = (result: any) => {
+      const qb: any = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(result),
+      };
+      return qb;
+    };
 
     beforeEach(() => {
       mockRepositories.groupTree.find.mockReset();
       mockRepositories.reportSubmission.find.mockReset();
       mockRepositories.groupMembership.find.mockReset();
       mockRepositories.contact.createQueryBuilder.mockReset();
+      mockRepositories.report.findOne.mockReset();
+      mockRepositories.report.createQueryBuilder.mockReset();
     });
 
     it('returns no groups when the user manages no groups (visibility scoping)', async () => {
@@ -994,7 +1005,7 @@ describe('ReportsService', () => {
       expect(mockRepositories.groupTree.find).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            id: expect.objectContaining({ _value: expect.arrayContaining([10]) }),
+            id: expect.objectContaining({ value: expect.arrayContaining([10]) }),
           }),
         }),
       );
@@ -1006,7 +1017,9 @@ describe('ReportsService', () => {
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue(null);
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder(null),
+      );
 
       const result = await service.getMcSubmissionCompliance(mockUser);
 
@@ -1019,7 +1032,9 @@ describe('ReportsService', () => {
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder({ id: 100 }),
+      );
 
       const from = new Date('2026-07-26'); // Sunday
       const to = new Date('2026-08-01');   // same reporting week
@@ -1049,41 +1064,57 @@ describe('ReportsService', () => {
       mockRepositories.groupMembership.find.mockResolvedValueOnce([
         { groupId: 10 },
         { groupId: 11 },
+        { groupId: 12 },
       ]);
       mockGroupTreeService.getGroupAndAllChildren = jest
         .fn()
-        .mockResolvedValue([10, 11]);
+        .mockResolvedValue([10, 11, 12]);
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
         { id: 11, name: 'MC Kampala' },
+        { id: 12, name: 'MC Jinja' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder({ id: 100 }),
+      );
 
       // Two-week range: 10 submitted both weeks (compliant, excluded),
-      // 11 submitted neither (should appear with weeksMissed = 2).
+      // 11 submitted neither (weeksMissed = 2), 12 submitted one of two
+      // weeks (weeksMissed = 1) — used to assert worst-first ordering.
       const from = new Date('2026-07-19');
       const to = new Date('2026-07-26');
       mockRepositories.reportSubmission.find.mockResolvedValue([
         { group: { id: 10 }, submittedAt: new Date('2026-07-21T10:00:00Z') },
         { group: { id: 10 }, submittedAt: new Date('2026-07-28T10:00:00Z') },
+        { group: { id: 12 }, submittedAt: new Date('2026-07-21T10:00:00Z') },
       ]);
       mockRepositories.groupMembership.find.mockResolvedValueOnce([
         { groupId: 11, contactId: 77 },
+        { groupId: 12, contactId: 88 },
       ]);
       mockRepositories.contact.createQueryBuilder.mockReturnValue(
         makeContactQueryBuilder([
           { id: 77, firstName: 'Brian', lastName: 'Okello', middleName: null },
+          { id: 88, firstName: 'Joy', lastName: 'Namono', middleName: null },
         ]),
       );
 
       const result = await service.getMcSubmissionCompliance(mockUser, from, to);
 
-      expect(result.groups).toHaveLength(1);
+      expect(result.groups).toHaveLength(2);
+      expect(result.groups.map((g) => g.groupId)).toEqual([11, 12]);
       expect(result.groups[0]).toMatchObject({
         groupId: 11,
         groupName: 'MC Kampala',
         leaderName: 'Brian Okello',
         weeksMissed: 2,
+        weeksInRange: 2,
+      });
+      expect(result.groups[1]).toMatchObject({
+        groupId: 12,
+        groupName: 'MC Jinja',
+        leaderName: 'Joy Namono',
+        weeksMissed: 1,
         weeksInRange: 2,
       });
     });
@@ -1094,7 +1125,9 @@ describe('ReportsService', () => {
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder({ id: 100 }),
+      );
 
       const from = new Date('2026-07-19');
       const to = new Date('2026-07-26'); // current week starts 2026-07-26
@@ -1123,7 +1156,9 @@ describe('ReportsService', () => {
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder({ id: 100 }),
+      );
       mockRepositories.reportSubmission.find.mockResolvedValue([]);
       // No active leader membership found for group 10.
       mockRepositories.groupMembership.find.mockResolvedValueOnce([]);
@@ -1149,7 +1184,9 @@ describe('ReportsService', () => {
       mockRepositories.groupTree.find.mockResolvedValue([
         { id: 10, name: 'MC Nairobi' },
       ]);
-      mockRepositories.report.findOne.mockResolvedValue({ id: 100 });
+      mockRepositories.report.createQueryBuilder.mockReturnValue(
+        makeReportQueryBuilder({ id: 100 }),
+      );
 
       const from = new Date('2026-07-26');
       const to = new Date('2026-08-01');

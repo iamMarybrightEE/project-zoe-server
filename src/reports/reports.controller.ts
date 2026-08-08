@@ -316,10 +316,10 @@ export class ReportsController {
     const parsedFrom = this.parseLocalDate(from);
     const parsedTo = this.parseLocalDate(to);
 
-    if (from && !parsedFrom) {
+    if (from?.trim() && !parsedFrom) {
       throw new BadRequestException(`Invalid "from" date: ${from}`);
     }
-    if (to && !parsedTo) {
+    if (to?.trim() && !parsedTo) {
       throw new BadRequestException(`Invalid "to" date: ${to}`);
     }
     if (parsedFrom && parsedTo && parsedFrom > parsedTo) {
