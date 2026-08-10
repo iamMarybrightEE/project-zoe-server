@@ -11,6 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 @Injectable()
 @WebSocketGateway({
   namespace: '/notifications',
+  path: '/server/socket.io',
   cors: {
     origin: process.env.FRONTEND_ORIGIN?.split(',').map((o) => o.trim()) ?? false,
     credentials: true,
