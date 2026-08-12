@@ -39,6 +39,32 @@ class Entity {
   email: string;
 }
 
+// parseContact()/getValueByKeys() already resolves firstName/lastName/email/phone/
+// dateOfBirth/gender headers case- and whitespace-insensitively. country, district,
+// and groupId are read directly off the raw row (see uploadFile/uploadGroupLeaders
+// below) and bypass that resolution, so we normalize headers here to keep those
+// direct reads working with human-readable CSV columns (e.g. "Country", "District").
+const CONTACT_HEADER_ALIASES: Record<string, string> = {
+  firstname: 'firstName',
+  lastname: 'lastName',
+  email: 'email',
+  phone: 'phone',
+  dateofbirth: 'dateOfBirth',
+  gender: 'gender',
+  district: 'district',
+  country: 'country',
+  address: 'address',
+  groupid: 'groupId',
+};
+
+function normalizeContactHeader(header: string): string {
+  const key = header
+    .replace(/^\uFEFF/, '')
+    .replace(/[\s_-]/g, '')
+    .toLowerCase();
+  return CONTACT_HEADER_ALIASES[key] ?? header;
+}
+
 @UseInterceptors(SentryInterceptor, TenantContextInterceptor)
 @UseGuards(JwtAuthGuard)
 @ApiTags('Crm Contacts')
@@ -78,7 +104,7 @@ export class ContactImportController {
     let list: any[];
     try {
       list = parseCsv(file.buffer, {
-        columns: true,
+        columns: (headers: string[]) => headers.map(normalizeContactHeader),
         skip_empty_lines: true,
         delimiter: ',',
         relax_column_count: false,
@@ -184,7 +210,7 @@ export class ContactImportController {
     let list: any[];
     try {
       list = parseCsv(file.buffer, {
-        columns: true,
+        columns: (headers: string[]) => headers.map(normalizeContactHeader),
         skip_empty_lines: true,
         delimiter: ',',
         relax_column_count: false,
