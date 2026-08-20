@@ -22,13 +22,16 @@ describe('GroupsMembershipService', () => {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
       groupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
       offset: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(),
       getRawMany: jest.fn().mockResolvedValue([]),
+      getRawOne: jest.fn().mockResolvedValue({ count: '0' }),
     };
 
     mockMembershipRepository = {
       find: jest.fn().mockResolvedValue([]),
+      findAndCount: jest.fn().mockResolvedValue([[], 0]),
       findOne: jest.fn(),
       save: jest.fn((memberships) =>
         Promise.resolve(
@@ -117,7 +120,7 @@ describe('GroupsMembershipService', () => {
   it('should insert every member in a bulk membership request', async () => {
     const inserted = await service.create({
       groupId: 9,
-      members:[51, 7],
+      members: [51, 7],
       role: GroupRole.Member,
     });
 
@@ -146,7 +149,7 @@ describe('GroupsMembershipService', () => {
         metadata: expect.objectContaining({
           created: 2,
           reactivated: 0,
-          contactIds:[51, 7],
+          contactIds: [51, 7],
           role: GroupRole.Member,
         }),
       }),
@@ -165,7 +168,7 @@ describe('GroupsMembershipService', () => {
     ]);
 
     await expect(
-      service.create({ groupId: 9, members:[51], role: GroupRole.Member }),
+      service.create({ groupId: 9, members: [51], role: GroupRole.Member }),
     ).rejects.toThrow(BadRequestException);
   });
 
@@ -183,22 +186,70 @@ describe('GroupsMembershipService', () => {
 
     const inserted = await service.create({
       groupId: 9,
-      members:[51],
+      members: [51],
       role: GroupRole.Leader,
     });
 
     expect(inserted).toBe(1);
   });
 
+  it('should list memberships by contactId', async () => {
+    const membership = {
+      id: 201,
+      groupId: 9,
+      contactId: 51,
+      role: GroupRole.Member,
+      joinedAt: new Date('2024-01-02T00:00:00.000Z'),
+      leftAt: null,
+      isActive: true,
+      contact: {
+        id: 51,
+        person: { firstName: 'Jane', lastName: 'Doe' },
+      },
+      group: {
+        id: 9,
+        name: 'Parent Group',
+        category: { id: 1, name: 'Location' },
+      },
+    };
+    mockMembershipRepository.findAndCount.mockResolvedValue([[membership], 7]);
+
+    const memberships = await service.findAll({ contactId: 51 });
+
+    expect(mockMembershipRepository.findAndCount).toHaveBeenCalledWith({
+      relations: ['contact', 'contact.person', 'group', 'group.category'],
+      where: { contactId: 51, isActive: true },
+      order: { id: 'ASC' },
+      skip: 0,
+      take: 100,
+    });
+    expect(memberships).toEqual({
+      data: [
+        expect.objectContaining({
+          id: 201,
+          groupId: 9,
+          contactId: 51,
+          contact: { id: 51, name: 'Jane Doe' },
+          group: { id: 9, name: 'Parent Group' },
+          category: { id: 1, name: 'Location' },
+          isInferred: true,
+          isActive: true,
+        }),
+      ],
+      total: 7,
+    });
+  });
+
   // Fix 2: Refactored assertions to follow our non-crashing manual sub-group lookup flow
   it('should list memberships for a group and its descendants', async () => {
     const parentGroup = { id: 9, name: 'Parent Group' };
     mockGroupRepository.findOneOrFail.mockResolvedValue(parentGroup);
-    
+
     // Simulate finding direct children manually via .find()
     mockGroupRepository.find.mockResolvedValue([{ id: 10 }]);
-    
+
     mockQb.getRawMany.mockResolvedValue([{ contactId: 51 }, { contactId: 52 }]);
+    mockQb.getRawOne.mockResolvedValue({ count: '2' });
     mockMembershipRepository.find.mockResolvedValue([
       {
         id: 101,
@@ -238,20 +289,22 @@ describe('GroupsMembershipService', () => {
 
     expect(mockGroupRepository.findOne).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: 9 })
-      })
+        where: expect.objectContaining({ id: 9 }),
+      }),
     );
-    
+
     expect(mockGroupRepository.find).toHaveBeenCalledWith({
       where: { parentId: 9 },
-      select: ['id']
+      select: ['id'],
     });
 
     expect(mockGroupRepository.find).toHaveBeenCalledWith({
       where: { parentId: 10 },
-      select: ['id']
+      select: ['id'],
     });
-    expect(memberships).toEqual([
+    expect(mockQb.orderBy).toHaveBeenCalledWith('m.contactId', 'ASC');
+    expect(memberships.total).toBe(2);
+    expect(memberships.data).toEqual([
       expect.objectContaining({
         id: 101,
         groupId: 9,

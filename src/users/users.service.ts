@@ -1,4 +1,10 @@
-import { HttpException, Injectable, Inject, Logger } from '@nestjs/common';
+import {
+  HttpException,
+  Injectable,
+  Inject,
+  Logger,
+  ForbiddenException,
+} from '@nestjs/common';
 import { In, Repository, Connection, ILike } from 'typeorm';
 import { User } from './entities/user.entity';
 import Email from 'src/crm/entities/email.entity';
@@ -23,6 +29,9 @@ import { GroupsMembershipService } from '../groups/services/group-membership.ser
 import { GroupRole } from '../groups/enums/groupRole';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { Tenant } from '../tenants/entities/tenant.entity';
+import GroupMembership from '../groups/entities/groupMembership.entity';
+import { GroupPermissionsService } from '../groups/services/group-permissions.service';
+import { GroupRepository } from '../shared/repository/group.repository';
 
 @Injectable()
 export class UsersService {
@@ -31,18 +40,29 @@ export class UsersService {
   private readonly rolesRepository: Repository<Roles>;
   private readonly userRolesRepository: Repository<UserRoles>;
   private readonly personRepository: Repository<Person>;
+  // Tenant-scoped: findNearestFobAncestor relies on this auto-applying the
+  // tenant filter instead of every call site re-supplying `tenant: { id }`.
+  private readonly groupRepository: GroupRepository;
+  // GroupMembership has no direct tenant column (it's scoped via its
+  // `group` relation), so this stays a plain repository with an explicit
+  // `group.tenantId` join filter, matching TasksService's convention.
+  private readonly membershipRepository: Repository<GroupMembership>;
+
   constructor(
     @Inject('CONNECTION') connection: Connection,
     private readonly contactsService: ContactsService,
     private readonly jwtHelperService: JwtHelperService,
     private readonly groupsMembershipService: GroupsMembershipService,
     private readonly tenantContext: TenantContext,
+    private readonly groupsPermissionsService: GroupPermissionsService,
   ) {
     this.repository = connection.getRepository(User);
     this.emailRepository = connection.getRepository(Email);
     this.rolesRepository = connection.getRepository(Roles);
     this.userRolesRepository = connection.getRepository(UserRoles);
     this.personRepository = connection.getRepository(Person);
+    this.groupRepository = new GroupRepository(connection.manager, tenantContext);
+    this.membershipRepository = connection.getRepository(GroupMembership);
   }
 
   async findAll(req: UserSearchDto): Promise<UserListDto[]> {
@@ -367,6 +387,92 @@ export class UsersService {
 
   async remove(id: number): Promise<void> {
     await this.repository.delete(id);
+  }
+
+  /**
+   * Lists the users belonging to a group (plus, if the group sits beneath a
+   * FOB, that FOB's leaders). Requires the caller to have permission for the
+   * target group — this returns member usernames/emails/roles, so it must
+   * not be reachable by an arbitrary authenticated tenant user.
+   */
+  async findUsersInGroup(groupId: number, user: any): Promise<UserListDto[]> {
+    const hasAccess = await this.groupsPermissionsService.hasPermissionForGroup(
+      user,
+      groupId,
+    );
+    if (!hasAccess) {
+      throw new ForbiddenException('Access denied to this group');
+    }
+
+    const tenantId = this.tenantContext.requireTenant();
+    const fobGroup = await this.findNearestFobAncestor(groupId);
+
+    const memberships = await this.membershipRepository
+      .createQueryBuilder('membership')
+      .innerJoin('membership.group', 'group')
+      .where('group.tenantId = :tenantId', { tenantId })
+      .andWhere('membership.isActive = true')
+      .andWhere(
+        fobGroup
+          ? '(membership.groupId = :groupId OR (membership.groupId = :fobGroupId AND membership.role = :leaderRole))'
+          : 'membership.groupId = :groupId',
+        { groupId, fobGroupId: fobGroup?.id, leaderRole: GroupRole.Leader },
+      )
+      .select(['membership.contactId'])
+      .getMany();
+
+    const contactIds = [...new Set(memberships.map((m) => m.contactId))];
+    if (contactIds.length === 0) return [];
+
+    const data = await this.repository.find({
+      relations: ['contact', 'contact.person', 'userRoles', 'userRoles.roles'],
+      where: { contactId: In(contactIds), tenant: { id: tenantId } },
+    });
+    return data.map((it) => this.toListModel(it));
+  }
+
+  /**
+   * Finds the nearest ancestor group whose category is FOB, walking up
+   * parentId one level at a time.
+   *
+   * Deliberately NOT using TreeRepository.findAncestors()/a closure-table
+   * join here: that call builds its join from the entity's schema-qualified
+   * table path, and when the schema is explicitly "public" TypeORM
+   * misparses "public.<table>" as an alias.relation reference and throws
+   * `"public" alias was not found` (a real TypeORM bug we hit in
+   * production). The per-level walk is a few extra round trips on what are
+   * normally shallow hierarchies, but it never touches that code path.
+   */
+  private async findNearestFobAncestor(
+    startGroupId: number,
+  ): Promise<{ id: number; name: string } | null> {
+    let currentId: number | null = startGroupId;
+    const visited = new Set<number>();
+
+    while (currentId !== null && !visited.has(currentId)) {
+      visited.add(currentId);
+
+      // groupRepository is tenant-aware, so this is implicitly scoped to
+      // the current tenant without repeating `tenant: { id: tenantId }`
+      // at this call site.
+      const group = await this.groupRepository.findOne({
+        where: { id: currentId },
+        relations: { category: true },
+      });
+
+      if (!group) return null;
+      // 'FOB' is a STRUCTURE-purpose category *name*, not a fixed system
+      // constant like GroupCategoryPurpose — structure category names
+      // (FOB, Region, Zone, Department, ...) are admin-configured per
+      // tenant, so there's no enum member to reference here.
+      if (group.category?.name === 'FOB') {
+        return { id: group.id, name: group.name };
+      }
+
+      currentId = group.parentId ?? null;
+    }
+
+    return null;
   }
 
   async findByName(username: string): Promise<User | undefined> {

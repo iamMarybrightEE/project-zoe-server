@@ -11,6 +11,8 @@ import { TenantContext } from '../shared/tenant/tenant-context';
 import { ContactActivityService } from '../crm/contact-activity.service';
 import { GroupPermissionsService } from '../groups/services/group-permissions.service';
 import { roleAdmin } from '../auth/constants';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 
 // TenantAwareRepository requires a real TypeORM EntityManager; intercept its
 // constructor so the test can supply mockGroupRepo without a live connection.
@@ -50,6 +52,8 @@ describe('TasksService — location-based visibility scoping', () => {
   let groupQb: any;
   let membershipQb: any;
   let commentQb: any;
+  let mockNotificationsService:any;
+  let consoleErrorSpy: jest.SpyInstance;
 
   const buildUser = (overrides: Record<string, any> = {}) => ({
     id: 100,
@@ -69,6 +73,7 @@ describe('TasksService — location-based visibility scoping', () => {
     });
     membershipQb = createChainableQb({
       getCount: jest.fn().mockResolvedValue(0),
+      getMany: jest.fn().mockResolvedValue([]),
     });
     commentQb = createChainableQb({
       getRawMany: jest.fn().mockResolvedValue([]),
@@ -78,6 +83,8 @@ describe('TasksService — location-based visibility scoping', () => {
       createQueryBuilder: jest.fn().mockReturnValue(taskQb),
       findOne: jest.fn(),
       find: jest.fn().mockResolvedValue([]),
+      create: jest.fn((input: any) => ({ ...input })),
+      save: jest.fn((task: any) => Promise.resolve({ id: 999, ...task })),
     };
     mockCommentRepo = {
       createQueryBuilder: jest.fn().mockReturnValue(commentQb),
@@ -89,9 +96,17 @@ describe('TasksService — location-based visibility scoping', () => {
     mockGroupRepo = {
       createQueryBuilder: jest.fn().mockReturnValue(groupQb),
     };
+    mockNotificationsService = {
+      create: jest.fn().mockResolvedValue({}),
+      findAllForUser: jest.fn().mockResolvedValue({ data: [], total: 0, unreadCount: 0, }),
+      getUnreadCount: jest.fn().mockResolvedValue(0),
+      markAsRead: jest.fn().mockResolvedValue({}),
+      markAllAsRead: jest.fn().mockResolvedValue({ updated: 0 }),
+    };
     // Must be set before module.compile() so the TenantAwareRepository mock
     // returns the current mockGroupRepo when the service is constructed.
     groupRepoForTest = mockGroupRepo;
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const mockConnection: Partial<Connection> = {
       getRepository: jest.fn((entity: any) => {
@@ -125,10 +140,17 @@ describe('TasksService — location-based visibility scoping', () => {
           provide: GroupPermissionsService,
           useValue: mockGroupPermissionsService,
         },
+        {
+          provide: NotificationsService, 
+          useValue: mockNotificationsService,
+        },
       ],
     }).compile();
 
     service = module.get<TasksService>(TasksService);
+  });
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
   });
 
   describe('findAll', () => {
@@ -326,6 +348,194 @@ describe('TasksService — location-based visibility scoping', () => {
 
       expect(mockGroupRepo.createQueryBuilder).not.toHaveBeenCalled();
       expect(mockTaskRepo.find).toHaveBeenCalled();
+    });
+  });
+
+  describe('create — task-assigned notification dispatch', () => {
+    const finalTask = (overrides: Record<string, any> = {}) => ({
+      id: 1,
+      type: 'FOLLOW_UP',
+      contact: { id: 5 },
+      assignedTo: null,
+      createdBy: null,
+      comments: [],
+      ...overrides,
+    });
+
+    it('sends a TASK_ASSIGNED notification when the task is created with an assignee', async () => {
+      mockTaskRepo.findOne.mockResolvedValue(
+        finalTask({ id: 1, assignedTo: { id: 42 } }),
+      );
+
+      await service.create(7, {
+        contactId: 5,
+        type: 'FOLLOW_UP',
+        assignedToId: 42,
+      } as any);
+
+      expect(mockNotificationsService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 42,
+          type: NotificationType.TASK_ASSIGNED,
+          link: '/tasks/mine',
+        }),
+      );
+    });
+
+    it('does not send a notification when the task is created unassigned', async () => {
+      mockTaskRepo.findOne.mockResolvedValue(finalTask({ id: 2 }));
+
+      await service.create(7, { contactId: 5, type: 'FOLLOW_UP' } as any);
+
+      expect(mockNotificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('does not let a rejected notification block task creation', async () => {
+      mockTaskRepo.findOne.mockResolvedValue(
+        finalTask({ id: 3, assignedTo: { id: 42 } }),
+      );
+      mockNotificationsService.create.mockRejectedValueOnce(new Error('down'));
+
+      await expect(
+        service.create(7, {
+          contactId: 5,
+          type: 'FOLLOW_UP',
+          assignedToId: 42,
+        } as any),
+      ).resolves.toBeDefined();
+
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        'Failed to send task-assigned notification:',
+        expect.any(Error),
+      );
+    });
+  });
+
+  describe('reassign — task-assigned notification dispatch', () => {
+    it('sends a TASK_ASSIGNED notification with the expected payload', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({
+          id: 9,
+          type: 'FOLLOW_UP',
+          status: 'TODO',
+          contact: { id: 5 },
+        })
+        .mockResolvedValueOnce({
+          id: 9,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: { id: 77 },
+          createdBy: null,
+          comments: [],
+        });
+
+      await service.reassign(9, 77, 1);
+
+      expect(mockNotificationsService.create).toHaveBeenCalledWith({
+        userId: 77,
+        type: NotificationType.TASK_ASSIGNED,
+        title: 'New task assigned',
+        body: expect.stringContaining('FOLLOW_UP'),
+        link: '/tasks/mine',
+      });
+    });
+
+    it('does not let a rejected notification block reassignment', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({
+          id: 10,
+          type: 'FOLLOW_UP',
+          status: 'TODO',
+          contact: { id: 5 },
+        })
+        .mockResolvedValueOnce({
+          id: 10,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: { id: 88 },
+          createdBy: null,
+          comments: [],
+        });
+      mockNotificationsService.create.mockRejectedValueOnce(new Error('down'));
+
+      await expect(service.reassign(10, 88, 1)).resolves.toBeDefined();
+    });
+  });
+
+  describe('update — task-assigned notification dispatch', () => {
+    it('sends a TASK_ASSIGNED notification when assignedToId changes to a new user', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({ id: 20, type: 'FOLLOW_UP', assignedTo: { id: 1 } })
+        .mockResolvedValueOnce({
+          id: 20,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: { id: 2 },
+          createdBy: null,
+          comments: [],
+        });
+
+      await service.update(20, { assignedToId: 2 } as any);
+
+      expect(mockNotificationsService.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 2,
+          type: NotificationType.TASK_ASSIGNED,
+          link: '/tasks/mine',
+        }),
+      );
+    });
+
+    it('does not send a notification when assignedToId is unchanged', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({ id: 21, type: 'FOLLOW_UP', assignedTo: { id: 3 } })
+        .mockResolvedValueOnce({
+          id: 21,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: { id: 3 },
+          createdBy: null,
+          comments: [],
+        });
+
+      await service.update(21, { assignedToId: 3 } as any);
+
+      expect(mockNotificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('does not send a notification when the assignment is cleared', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({ id: 22, type: 'FOLLOW_UP', assignedTo: { id: 3 } })
+        .mockResolvedValueOnce({
+          id: 22,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: null,
+          createdBy: null,
+          comments: [],
+        });
+
+      await service.update(22, { assignedToId: null } as any);
+
+      expect(mockNotificationsService.create).not.toHaveBeenCalled();
+    });
+
+    it('does not let a rejected notification block the update', async () => {
+      mockTaskRepo.findOne
+        .mockResolvedValueOnce({ id: 23, type: 'FOLLOW_UP', assignedTo: { id: 1 } })
+        .mockResolvedValueOnce({
+          id: 23,
+          type: 'FOLLOW_UP',
+          contact: { id: 5 },
+          assignedTo: { id: 2 },
+          createdBy: null,
+          comments: [],
+        });
+      mockNotificationsService.create.mockRejectedValueOnce(new Error('down'));
+
+      await expect(
+        service.update(23, { assignedToId: 2 } as any),
+      ).resolves.toBeDefined();
     });
   });
 });

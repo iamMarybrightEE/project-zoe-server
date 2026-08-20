@@ -22,6 +22,8 @@ import { CLOSED_STATUSES, TaskStatus } from './enums/task-status.enum';
 import { TaskType } from './enums/task-type.enum';
 import { ContactActivityType } from '../crm/enums/contact-activity-type.enum';
 import { GroupCategoryPurpose } from '../groups/enums/groups';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationType } from '../notifications/entities/notification.entity';
 
 const TASK_SUMMARY_RELATIONS = [
   'contact',
@@ -78,6 +80,7 @@ export class TasksService {
     private readonly tenantContext: TenantContext,
     private readonly contactActivityService: ContactActivityService,
     private readonly groupPermissionsService: GroupPermissionsService,
+    private readonly notificationsService: NotificationsService,
   ) {
     this.connection = connection;
     this.taskRepository = connection.getRepository(Task);
@@ -117,7 +120,22 @@ export class TasksService {
       referenceTable: 'task',
       referenceId: saved.id,
     });
-
+    // tasks.service.ts — inside create()
+    if (dto.assignedToId) {
+      try {
+        await this.notificationsService.create({
+          userId: dto.assignedToId,
+          type: NotificationType.TASK_ASSIGNED,
+          title: 'New task assigned',
+          body: `You've been assigned a ${dto.type} task`,
+          link: '/tasks/mine',
+        });
+      } catch (err) {
+        // Don't let a notification failure break task creation
+        console.error('Failed to send task-assigned notification:', err);
+      }
+    }
+    
     return this.findTaskWithRelations(saved.id, tenantId);
   }
 
@@ -272,11 +290,17 @@ export class TasksService {
     return tasksWithLocationGroups;
   }
 
-  async findOne(taskId: number, user: any): Promise<Task> {
+  async findOne(taskId: number, user: any): Promise<TaskWithLocationGroup> {
     const tenantId = this.tenantContext.requireTenant();
-    const task = await this.findTaskWithRelations(taskId, tenantId);
+    const task = await this.taskRepository.findOne({
+      where: { id: taskId, tenant: { id: tenantId } },
+      relations: ['contact'],
+    });
+    if (!task) {
+      throw new NotFoundException(`Task ${taskId} not found`);
+    }
     await this.assertContactLocationAccess(task.contact.id, user);
-    return task;
+    return this.findTaskWithRelations(taskId, tenantId);
   }
 
   async update(
@@ -286,8 +310,10 @@ export class TasksService {
     const tenantId = this.tenantContext.requireTenant();
     const task = await this.taskRepository.findOne({
       where: { id: taskId, tenant: { id: tenantId } },
+      relations: ['assignedTo'],
     });
     if (!task) throw new NotFoundException(`Task ${taskId} not found`);
+    const previousAssignedToId = task.assignedTo?.id ?? null;
 
     if (dto.title !== undefined) task.title = dto.title;
     if (dto.assignedToId !== undefined) {
@@ -300,6 +326,28 @@ export class TasksService {
     }
 
     await this.taskRepository.save(task);
+
+    // Notify only when the assignment actually changed to a new assignee
+    // (mirrors the notification sent in create()/reassign()); clearing an
+    // assignment (assignedToId === null) has no one to notify.
+    const assignmentChanged =
+      dto.assignedToId !== undefined &&
+      dto.assignedToId !== null &&
+      dto.assignedToId !== previousAssignedToId;
+    if (assignmentChanged) {
+      try {
+        await this.notificationsService.create({
+          userId: dto.assignedToId,
+          type: NotificationType.TASK_ASSIGNED,
+          title: 'New task assigned',
+          body: `You've been assigned a ${task.type} task`,
+          link: '/tasks/mine',
+        });
+      } catch (err) {
+        console.error('Failed to send task-assigned notification:', err);
+      }
+    }
+
     return this.findTaskWithRelations(taskId, tenantId);
   }
 
@@ -476,7 +524,7 @@ export class TasksService {
   private async findTaskWithRelations(
     taskId: number,
     tenantId: number,
-  ): Promise<Task> {
+  ): Promise<TaskWithLocationGroup> {
     const task = await this.taskRepository.findOne({
       where: { id: taskId, tenant: { id: tenantId } },
       relations: [...TASK_DETAIL_RELATIONS],
@@ -486,9 +534,14 @@ export class TasksService {
       throw new NotFoundException(`Task ${taskId} not found`);
     }
 
-    this.sanitizeTaskUsers(task);
-    this.attachContactAddress(task);
-    return task;
+    const [taskWithLocationGroup] = await this.attachLocationGroups(
+      [task],
+      tenantId,
+    );
+
+    this.sanitizeTaskUsers(taskWithLocationGroup);
+    this.attachContactAddress(taskWithLocationGroup);
+    return taskWithLocationGroup;
   }
 
   private sanitizeTaskUsers(task: Task): void {
@@ -811,6 +864,18 @@ export class TasksService {
       referenceTable: 'task',
       referenceId: task.id,
     });
+    // tasks.service.ts — inside reassign(), same pattern
+    try {
+      await this.notificationsService.create({
+        userId: assignedToId,
+        type: NotificationType.TASK_ASSIGNED,
+        title: 'New task assigned',
+        body: `You've been assigned a ${task.type} task`,
+        link: '/tasks/mine',
+      });
+    } catch (err) {
+      console.error('Failed to send task-assigned notification:', err);
+    }
 
     return this.findTaskWithRelations(saved.id, tenantId);
   }

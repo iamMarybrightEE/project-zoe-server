@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Header,
   Post,
   Patch,
   Put,
@@ -21,6 +22,7 @@ import { Repository, Connection } from 'typeorm';
 import { ReportSubmissionDto } from './dto/report-submission.dto';
 import { ReportDto } from './dto/report.dto';
 import { Report } from './entities/report.entity';
+import { type McComplianceResponse } from './reports.service';
 import {
   ApiResponse,
   ReportSubmissionsApiResponse,
@@ -122,6 +124,19 @@ export class ReportsController {
     });
   }
 
+  @Get('mca/weekly-summary')
+  @Header('Cache-Control', 'no-store')
+  async getWeeklyMcaSummary(@Request() request): Promise<any> {
+    this.logger.apiLog('log', 'Get weekly MCA summary request received', {
+      operation: 'getWeeklyMcaSummary',
+      resource: 'reports',
+      metadata: {
+        userId: request.user?.id,
+      },
+    });
+    return await this.reportService.getWeeklyMcaSummary(request.user);
+  }
+  
   @Get('submissions/:id')
   async getSubmissionDetails(
     @Param('id', ParseIntPipe) id: number,
@@ -280,5 +295,68 @@ export class ReportsController {
       smallGroupIdList,
       parentGroupIdList,
     );
+  }
+  
+  @Get('mc/compliance')
+  @Header('Cache-Control', 'no-store')
+  async getMcSubmissionCompliance(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Request() request?: any,
+  ): Promise<McComplianceResponse> {
+    this.logger.apiLog('log', 'Get MC submission compliance request received', {
+      operation: 'getMcSubmissionCompliance',
+      resource: 'reports',
+      metadata: {
+        userId: request.user?.id,
+        from,
+        to,
+      },
+    });
+    const parsedFrom = this.parseLocalDate(from);
+    const parsedTo = this.parseLocalDate(to);
+
+    if (from?.trim() && !parsedFrom) {
+      throw new BadRequestException(`Invalid "from" date: ${from}`);
+    }
+    if (to?.trim() && !parsedTo) {
+      throw new BadRequestException(`Invalid "to" date: ${to}`);
+    }
+    if (parsedFrom && parsedTo && parsedFrom > parsedTo) {
+      throw new BadRequestException('"from" date must not be after "to" date');
+    }
+    return await this.reportService.getMcSubmissionCompliance(
+      request.user,
+      parsedFrom ?? undefined,
+      parsedTo ?? undefined,
+    );
+  }
+  /**
+   * Parses a 'YYYY-MM-DD' date-only string using local calendar fields,
+   * avoiding the UTC-midnight shift that `new Date('YYYY-MM-DD')` causes
+   * for any timezone west of UTC. Returns undefined for empty/missing
+   * input and null for a malformed or invalid calendar date so callers
+   * can distinguish "not provided" from "bad input".
+   */
+  private parseLocalDate(value?: unknown): Date | undefined | null {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string') return null;    
+    const normalized = value.trim();
+    if (normalized === '') return undefined;    
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);    
+    if (match) {
+        const [, y, m, d] = match;
+        const date = new Date(Number(y), Number(m) - 1, Number(d));
+        if (
+            date.getFullYear() !== Number(y) ||
+            date.getMonth() !== Number(m) - 1 ||
+            date.getDate() !== Number(d)
+        ) {
+            return null;
+        }        
+        return date;
+    } else {
+        return null;
+    }
   }
 }

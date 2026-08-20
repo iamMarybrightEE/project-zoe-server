@@ -1,5 +1,5 @@
-import { Injectable, Inject, NotFoundException } from '@nestjs/common';
-import { Between, Connection, In, Repository } from 'typeorm';
+import { Injectable, Inject, NotFoundException, Logger } from '@nestjs/common';
+import { Between, Brackets, Connection, In, Repository } from 'typeorm';
 import { ReportSubmission } from '../reports/entities/report.submission.entity';
 import { Report } from '../reports/entities/report.entity';
 import { GroupPermissionsService } from '../groups/services/group-permissions.service';
@@ -8,6 +8,7 @@ import Person from '../crm/entities/person.entity';
 import Contact from '../crm/entities/contact.entity';
 import { TenantContext } from '../shared/tenant/tenant-context';
 import { ContactCategory } from '../crm/enums/contactCategory';
+import { GroupCategoryPurpose } from '../groups/enums/groups';
 
 interface PgaTrendPoint {
   period: string;
@@ -20,6 +21,22 @@ interface LocationPgaRanking {
   pga: number;
 }
 
+interface GroupHierarchyEntry {
+  parentId: number | null;
+  purpose: GroupCategoryPurpose | null;
+  name: string;
+}
+
+interface BirthdayEntry {
+  id: number;
+  name: string;
+  dateOfBirth: string | Date;
+  location: string;
+  upcomingDate: string;
+}
+
+const UNKNOWN_ROOT_LABEL = 'Unknown';
+
 @Injectable()
 export class DashboardService {
   private readonly reportSubmissionRepository: Repository<ReportSubmission>;
@@ -27,6 +44,7 @@ export class DashboardService {
   private readonly groupRepository: Repository<Group>;
   private readonly personRepository: Repository<Person>;
   private readonly contactRepository: Repository<Contact>;
+  private readonly logger = new Logger(DashboardService.name);
 
   constructor(
     @Inject('CONNECTION') connection: Connection,
@@ -378,63 +396,211 @@ export class DashboardService {
       pga: Number(row.pga),
     }));
   }
+  /**
+ * The (month, day) pairs for today through the next 6 days, used to filter
+ * contacts at the SQL level instead of loading every contact in the tenant.
+ */
+  private getBirthdayWindowDays(today: Date): { month: number; day: number }[] {
+    const days: { month: number; day: number }[] = [];
+    for (let i = 0; i <= 6; i++) {
+      const d = new Date(today);
+      d.setDate(today.getDate() + i);
+      days.push({ month: d.getMonth() + 1, day: d.getDate() });
+    }
+    return days;
+  }
+  private async findBirthdayWindowContacts(
+    tenantId: number,
+    windowDays: { month: number; day: number }[],
+  ): Promise<Contact[]> {
+    const qb = this.contactRepository
+      .createQueryBuilder('contact')
+      .innerJoinAndSelect('contact.person', 'person')
+      .leftJoinAndSelect('contact.groupMemberships', 'groupMemberships')
+      .leftJoinAndSelect('groupMemberships.group', 'group')
+      .where('contact.tenantId = :tenantId', { tenantId })
+      .andWhere('contact.category = :category', {
+        category: ContactCategory.Person,
+      })
+      .andWhere('person.dateOfBirth IS NOT NULL')
+      .andWhere(
+        new Brackets((qbInner) => {
+          windowDays.forEach((wd, idx) => {
+            const condition = `(EXTRACT(MONTH FROM person."dateOfBirth"::date) = :month${idx} AND EXTRACT(DAY FROM person."dateOfBirth"::date) = :day${idx})`;
+            if (idx === 0) {
+              qbInner.where(condition, {
+                [`month${idx}`]: wd.month,
+                [`day${idx}`]: wd.day,
+              });
+            } else {
+              qbInner.orWhere(condition, {
+                [`month${idx}`]: wd.month,
+                [`day${idx}`]: wd.day,
+              });
+            }
+          });
+        }),
+      );
+
+    return qb.getMany();
+  }
+  /**
+   * Build a groupId -> hierarchy entry map for the tenant, so we can walk up
+   * from a membership's group to its Location-purpose ancestor (or tenant
+   * root) without one query per contact.
+   */
+  private async loadGroupHierarchyMap(
+    tenantId: number,
+  ): Promise<Map<number, GroupHierarchyEntry>> {
+    const groups = await this.groupRepository.find({
+      where: { tenant: { id: tenantId } },
+      relations: ['category'],
+      select: {
+        id: true,
+        name: true,
+        parentId: true,
+        category: { id: true, purpose: true },
+      },
+    });
+
+    const map = new Map<number, GroupHierarchyEntry>();
+    for (const g of groups) {
+      map.set(g.id, {
+        parentId: g.parentId ?? null,
+        purpose: g.category?.purpose ?? null,
+        name: g.name,
+      });
+    }
+    return map;
+  }
+
+  /**
+   * Walk up from a group to the nearest ancestor whose category purpose is
+   * LOCATION. Returns null if no such ancestor exists.
+   */
+  private resolveLocationName(
+    groupId: number,
+    hierarchy: Map<number, GroupHierarchyEntry>,
+  ): string | null {
+    let current = hierarchy.get(groupId);
+    const seen = new Set<number>();
+
+    while (current && current.purpose !== GroupCategoryPurpose.LOCATION) {
+      if (current.parentId == null || seen.has(current.parentId)) {
+        current = undefined;
+        break;
+      }
+      seen.add(current.parentId);
+      current = hierarchy.get(current.parentId);
+    }
+
+    return current?.purpose === GroupCategoryPurpose.LOCATION ? current.name : null;
+  }
+
+  /**
+   * Resolve every distinct Location name reachable from a contact's active
+   * memberships.
+   */
+  private resolveLocationNames(
+    groupIds: number[],
+    hierarchy: Map<number, GroupHierarchyEntry>,
+  ): string[] {
+    const names = new Set<string>();
+    for (const groupId of groupIds) {
+      const name = this.resolveLocationName(groupId, hierarchy);
+      if (name) {
+        names.add(name);
+      }
+    }
+    return [...names];
+  }
+
+  /**
+   * Find the tenant's root group name(s) - group(s) with no parentId. Used
+   * as the fallback label when a contact has no resolvable Location
+   * ancestor, instead of a generic placeholder string.
+   */
+  private resolveTenantRootName(hierarchy: Map<number, GroupHierarchyEntry>): string {
+    const roots = [...hierarchy.values()].filter((g) => g.parentId == null);
+
+    if (roots.length === 0) {
+      return UNKNOWN_ROOT_LABEL;
+    }
+
+    return roots
+      .map((r) => r.name)
+      .sort((a, b) => a.localeCompare(b))
+      .join(', ');
+  }
+
+  /**
+   * Parse a Person.dateOfBirth value into a local Date, treating bare
+   * 'YYYY-MM-DD' strings as local-midnight rather than UTC-midnight. Without
+   * this, `new Date('1990-05-14')` is parsed as UTC and can shift a day
+   * backward/forward depending on the server's local timezone.
+   */
+  private parseDateOnly(value: string | Date): Date {
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const [year, month, day] = value.split('-').map(Number);
+      const date = new Date(year, month - 1, day);
+      if (
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day
+      ) {
+        return new Date(NaN);
+      }
+      return date;
+    }
+    return new Date(value);
+  }
 
   /**
    * Get birthdays for the current week (today through next 6 days).
    * Returns people sorted by birthday date (earliest first).
    * Handles edge cases: month boundaries, year boundaries, missing data.
    */
-  async getBirthdaysThisWeek(): Promise<any> {
+  async getBirthdaysThisWeek(): Promise<{ birthdays: BirthdayEntry[] }> {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Get tenant from context
     const tenantId = this.tenantContext.requireTenant();
+    const windowDays = this.getBirthdayWindowDays(today);
 
-    //  Added 'groupMembership' and 'groupMembership.group' relations to load location contexts
-    const contacts = await this.contactRepository.find({
-      where: {
-        tenant: { id: tenantId },
-        category: ContactCategory.Person,
-      },
-      relations: ['person', 'groupMemberships', 'groupMemberships.group'],
-      select: {
-        id: true,
-        person: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          dateOfBirth: true,
-        },
-        // Select group data parameters safely
-        groupMemberships: {
-          id: true,
-          groupId: true,
-          isActive: true,
-          group: {
-            id: true,
-            name: true,
-          }
-        }
-      },
-    });
+    const [contacts, hierarchy] = await Promise.all([
+      this.findBirthdayWindowContacts(tenantId, windowDays),
+      this.loadGroupHierarchyMap(tenantId),
+    ]);
 
-    // Filter contacts that have person with dateOfBirth
+    const rootFallbackName = this.resolveTenantRootName(hierarchy);
+
     const birthdaysThisWeek = contacts
-      .filter((contact) => contact.person?.dateOfBirth)
-      .map((contact) => {
-        try {
-          const person = contact.person;
-          const dob = new Date(person?.dateOfBirth);
+      .map((contact): (BirthdayEntry & { _sortDate: Date }) | null => {
+        const person = contact.person;
+        if (!person?.dateOfBirth) {
+          return null;
+        }
 
-          if (isNaN(dob.getTime())) return null;
+        try {
+          const dob = this.parseDateOnly(person.dateOfBirth);
+          if (isNaN(dob.getTime())) {
+            this.logger.warn(
+              `Skipping contact ${contact.id}: unparseable dateOfBirth`,
+            );
+            return null;
+          }
 
           const birthMonth = dob.getMonth();
           const birthDay = dob.getDate();
 
-          // DYNAMICALLY RESOLVE LOCATION: Find the name of their active group (MC)
-          const activeMembership = contact.groupMemberships?.find(m => m.isActive !== false);
-          const resolvedLocation = activeMembership?.group?.name || 'General Locations';
+          const activeMemberships =
+            contact.groupMemberships?.filter((m) => m.isActive) ?? [];
+          const locationNames = this.resolveLocationNames(
+            activeMemberships.map((m) => m.groupId),
+            hierarchy,
+          );
+          const resolvedLocation =
+            locationNames.length > 0 ? locationNames.join(', ') : rootFallbackName;
 
           for (let i = 0; i <= 6; i++) {
             const checkDate = new Date(today);
@@ -448,21 +614,24 @@ export class DashboardService {
               upcomingDate.setHours(0, 0, 0, 0);
 
               return {
-                id: person?.id,
-                name: `${person?.firstName} ${person?.lastName}`,
-                dateOfBirth: person?.dateOfBirth,
+                id: person.id,
+                name: `${person.firstName} ${person.lastName}`,
+                dateOfBirth: person.dateOfBirth,
                 location: resolvedLocation,
-                upcomingDate: upcomingDate.toISOString().split('T')[0],
+                upcomingDate: this.toDateString(upcomingDate),
                 _sortDate: upcomingDate,
               };
             }
           }
           return null;
         } catch (error) {
+          this.logger.warn(
+            `Failed to resolve birthday entry for contact ${contact.id}: ${error instanceof Error ? error.message : error}`,
+          );
           return null;
         }
       })
-      .filter((item) => item !== null)
+      .filter((item): item is BirthdayEntry & { _sortDate: Date } => item !== null)
       .sort((a, b) => a._sortDate.getTime() - b._sortDate.getTime())
       .map(({ _sortDate, ...birthday }) => birthday);
 

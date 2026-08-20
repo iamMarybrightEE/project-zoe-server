@@ -28,6 +28,6 @@ import { AppLogger } from 'src/utils/app-logger.service';
     JwtHelperService,
     AppLogger,
   ],
-  exports: [AuthService, JwtHelperService],
+  exports: [AuthService, JwtHelperService, JwtModule],
 })
 export class AuthModule {}

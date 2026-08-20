@@ -9,9 +9,11 @@ import config from './config';
 import { ValidationPipe } from '@nestjs/common';
 import { HttpExceptionFilter } from './auth/http-exception.filter';
 import * as Sentry from '@sentry/node';
+import { IoAdapter } from '@nestjs/platform-socket.io';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.useWebSocketAdapter(new IoAdapter(app)); // ← add this line
   app.use(helmet());
   app.enableCors({
     origin: '*',
