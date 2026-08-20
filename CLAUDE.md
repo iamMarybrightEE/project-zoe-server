@@ -130,9 +130,11 @@ This enables cross-location aggregation without code changes:
 | `ReportMetricFieldMap` | Maps metric keys to field names for `functionName`-driven reports |
 
 `ReportSubmission` has `submittedAt` (when entered) and `reportingPeriod` (which
-period the data covers — `'YYYY-MM-DD'` for weekly, `'YYYY-MM'` for monthly).
-Use `reportingPeriod` as the time axis for all trend queries; `submittedAt` is
-for audit purposes only.
+period the data covers). `reportingPeriod` is a PostgreSQL `date` column, so it
+always stores a full date: `'YYYY-MM-DD'` for weekly/daily (the period's start
+date) and `'YYYY-MM-01'` for monthly (the first of the month). Use
+`reportingPeriod` as the time axis for all trend queries; `submittedAt` is for
+audit purposes only.
 
 The `functionName` switch in `reports.service.ts` (~line 443) dispatches to custom
 computation functions. New computed report types are registered there.
