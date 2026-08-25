@@ -14,6 +14,7 @@ import {
   Like,
   Repository,
   Connection,
+  EntityManager,
   TreeRepository,
   DeepPartial,
 } from 'typeorm';
@@ -34,6 +35,7 @@ import Company from './entities/company.entity';
 import { CreateCompanyDto } from './dto/create-company.dto';
 import { hasNoValue, hasValue } from 'src/utils/validation';
 import Address from './entities/address.entity';
+import { User } from '../users/entities/user.entity';
 import GroupMembership from '../groups/entities/groupMembership.entity';
 import { GroupRole } from '../groups/enums/groupRole';
 import { roleAdmin } from '../auth/constants';
@@ -69,6 +71,12 @@ export class ContactsService {
   private readonly groupRepository: TreeRepository<Group>;
   private readonly gmRequestRepository: Repository<GroupMembershipRequest>;
   private readonly tenantRepository: Repository<Tenant>;
+  // Email doubles as login username for User (see UsersService.update) — this
+  // repository lets ContactsService keep that in sync going the other
+  // direction, without depending on UsersModule (which already depends on
+  // CrmModule, so importing UsersService here would be circular).
+  private readonly userRepository: Repository<User>;
+  private readonly connection: Connection;
   private readonly logger: ContextLogger;
 
   constructor(
@@ -91,6 +99,8 @@ export class ContactsService {
     this.groupRepository = connection.getTreeRepository(Group);
     this.gmRequestRepository = connection.getRepository(GroupMembershipRequest);
     this.tenantRepository = connection.getRepository(Tenant);
+    this.userRepository = connection.getRepository(User);
+    this.connection = connection;
     this.logger = this.appLogger.createContextLogger('ContactsService');
   }
 
@@ -601,21 +611,6 @@ export class ContactsService {
         }
       }
 
-      // Handle emails update with efficient upsert
-      if (data.emails) {
-        await this.updateEmailsEfficiently(existingContact, data.emails);
-      }
-
-      // Handle phones update with efficient upsert
-      if (data.phones) {
-        await this.updatePhonesEfficiently(existingContact, data.phones);
-      }
-
-      // Handle addresses update with efficient upsert
-      if (data.addresses) {
-        await this.updateAddressesEfficiently(existingContact, data.addresses);
-      }
-
       // Handle other contact fields (excluding nested entities and group assignment)
       const {
         person,
@@ -631,8 +626,36 @@ export class ContactsService {
       }
 
       try {
-        // Save the contact first (without group memberships to avoid constraint issues)
-        const savedContact = await this.repository.save(existingContact);
+        // Save the contact first (without group memberships to avoid constraint issues).
+        // Phone/address upserts, email mutation, and the linked User sync must
+        // all roll back together with the contact save on any collision error.
+        const savedContact = await this.connection.transaction(
+          async(manager) => {
+            if (data.phones) {
+              await this.updatePhonesEfficiently(
+                existingContact,
+                data.phones,
+                manager,
+              );
+            }
+            if (data.addresses) {
+              await this.updateAddressesEfficiently(
+                existingContact,
+                data.addresses,
+                manager,
+              );
+            }
+            if (data.emails) {
+              await this.updateEmailsEfficiently(
+                existingContact,
+                data.emails,
+                manager,
+              );
+              await this.syncUserEmailFromContact(existingContact, manager);
+            }
+            return manager.getRepository(Contact).save(existingContact);
+          },
+        );
 
         // Handle group membership updates after contact is saved
         const groups = (data as any).groups;
@@ -1287,21 +1310,6 @@ export class ContactsService {
         }
       }
 
-      // Handle nested email updates
-      if (data.emails) {
-        await this.updateEmailsEfficiently(existingContact, data.emails);
-      }
-
-      // Handle nested phone updates
-      if (data.phones) {
-        await this.updatePhonesEfficiently(existingContact, data.phones);
-      }
-
-      // Handle nested address updates
-      if (data.addresses) {
-        await this.updateAddressesEfficiently(existingContact, data.addresses);
-      }
-
       // Remove groups field from contact data since it's handled separately
       const {
         person: __person,
@@ -1317,8 +1325,37 @@ export class ContactsService {
       }
 
       try {
-        // Save the contact first (without group memberships to avoid constraint issues)
-        const savedContact = await this.repository.save(existingContact);
+        // Save the contact first (without group memberships to avoid constraint issues).
+        // Phone/address upserts, email mutation, username-collision validation,
+        // and the linked User update must all roll back together with the
+        // contact save on any collision error.
+        const savedContact = await this.connection.transaction(
+          async(manager) => {
+            if (data.phones) {
+              await this.updatePhonesEfficiently(
+                existingContact,
+                data.phones,
+                manager,
+              );
+            }
+            if (data.addresses) {
+              await this.updateAddressesEfficiently(
+                existingContact,
+                data.addresses,
+                manager,
+              );
+            }
+            if (data.emails) {
+              await this.updateEmailsEfficiently(
+                existingContact,
+                data.emails,
+                manager,
+              );
+              await this.syncUserEmailFromContact(existingContact, manager);
+            }
+            return manager.getRepository(Contact).save(existingContact);
+          },
+        );
 
         // Handle group membership updates after contact is saved
         if (data.groups !== undefined) {
@@ -1672,7 +1709,11 @@ export class ContactsService {
   private async updateEmailsEfficiently(
     existingContact: Contact,
     newEmails: Partial<Email>[],
+    manager?: EntityManager,
   ): Promise<void> {
+    const emailRepository = manager
+      ? manager.getRepository(Email)
+      : this.emailRepository;
     const existingEmails = existingContact.emails || [];
     const emailsToKeep: Email[] = [];
     const emailsToUpdate: Email[] = [];
@@ -1703,20 +1744,18 @@ export class ContactsService {
     );
 
     if (emailsToRemove.length > 0) {
-      await this.emailRepository.remove(emailsToRemove);
+      await emailRepository.remove(emailsToRemove);
     }
 
     // Update existing emails
     if (emailsToUpdate.length > 0) {
-      await this.emailRepository.save(emailsToUpdate);
+      await emailRepository.save(emailsToUpdate);
     }
 
     // Create new emails
     if (emailsToCreate.length > 0) {
-      const createdEmails = await this.emailRepository.save(
-        emailsToCreate.map((emailData) =>
-          this.emailRepository.create(emailData),
-        ),
+      const createdEmails = await emailRepository.save(
+        emailsToCreate.map((emailData) => emailRepository.create(emailData)),
       );
       emailsToKeep.push(...createdEmails);
     }
@@ -1724,10 +1763,64 @@ export class ContactsService {
     existingContact.emails = emailsToKeep;
   }
 
+  /**
+   * Keeps User.email/username in sync when a contact's email is patched via
+   * this endpoint — the reverse direction of UsersService.update(), which
+   * syncs the contact's Email row when the user's login email changes.
+   * No-op for contacts that have no login User (e.g. visitors).
+   */
+  private async syncUserEmailFromContact(
+    contact: Contact,
+    manager?: EntityManager,
+  ): Promise<void> {
+    const userRepository = manager
+      ? manager.getRepository(User)
+      : this.userRepository;
+    const tenantId = this.tenantContext.requireTenant();
+    const tenantWhere = { tenant: { id: tenantId } };
+
+    const user = await userRepository.findOne({
+      where: { contactId: contact.id, ...tenantWhere },
+    });
+    if (!user) return;
+
+    const primaryEmail =
+      contact.emails?.find((e) => e.isPrimary)?.value ??
+      contact.emails?.[0]?.value;
+    // Don't blank out an existing login if the last email was removed.
+    if (!hasValue(primaryEmail)) return;
+
+    const normalizedEmail = primaryEmail.trim().toLowerCase();
+    if (
+      normalizedEmail === user.username?.toLowerCase() &&
+      normalizedEmail === user.email?.toLowerCase()
+    )
+      return;
+
+    const existing = await userRepository.findOne({
+      where: [
+        { username: ILike(normalizedEmail), ...tenantWhere },
+        { email: ILike(normalizedEmail), ...tenantWhere },
+      ],
+    });
+    if (existing && existing.id !== user.id) {
+      throw new BadRequestException('Email already in use by another user');
+    }
+
+    await userRepository.update(
+      { id: user.id, ...tenantWhere },
+      { email: normalizedEmail, username: normalizedEmail },
+    );
+  }
+
   private async updatePhonesEfficiently(
     existingContact: Contact,
     newPhones: Partial<Phone>[],
+    manager?: EntityManager,
   ): Promise<void> {
+    const phoneRepository = manager
+      ? manager.getRepository(Phone)
+      : this.phoneRepository;
     const existingPhones = existingContact.phones || [];
     const phonesToKeep: Phone[] = [];
     const phonesToUpdate: Phone[] = [];
@@ -1758,20 +1851,18 @@ export class ContactsService {
     );
 
     if (phonesToRemove.length > 0) {
-      await this.phoneRepository.remove(phonesToRemove);
+      await phoneRepository.remove(phonesToRemove);
     }
 
     // Update existing phones
     if (phonesToUpdate.length > 0) {
-      await this.phoneRepository.save(phonesToUpdate);
+      await phoneRepository.save(phonesToUpdate);
     }
 
     // Create new phones
     if (phonesToCreate.length > 0) {
-      const createdPhones = await this.phoneRepository.save(
-        phonesToCreate.map((phoneData) =>
-          this.phoneRepository.create(phoneData),
-        ),
+      const createdPhones = await phoneRepository.save(
+        phonesToCreate.map((phoneData) => phoneRepository.create(phoneData)),
       );
       phonesToKeep.push(...createdPhones);
     }
@@ -1782,7 +1873,11 @@ export class ContactsService {
   private async updateAddressesEfficiently(
     existingContact: Contact,
     newAddresses: Partial<Address>[],
+    manager?: EntityManager,
   ): Promise<void> {
+    const addressRepository = manager
+      ? manager.getRepository(Address)
+      : this.addressRepository;
     const existingAddresses = existingContact.addresses || [];
     const addressesToKeep: Address[] = [];
     const addressesToUpdate: Address[] = [];
@@ -1815,19 +1910,19 @@ export class ContactsService {
     );
 
     if (addressesToRemove.length > 0) {
-      await this.addressRepository.remove(addressesToRemove);
+      await addressRepository.remove(addressesToRemove);
     }
 
     // Update existing addresses
     if (addressesToUpdate.length > 0) {
-      await this.addressRepository.save(addressesToUpdate);
+      await addressRepository.save(addressesToUpdate);
     }
 
     // Create new addresses
     if (addressesToCreate.length > 0) {
-      const createdAddresses = await this.addressRepository.save(
+      const createdAddresses = await addressRepository.save(
         addressesToCreate.map((addressData) =>
-          this.addressRepository.create(addressData),
+          addressRepository.create(addressData),
         ),
       );
       addressesToKeep.push(...createdAddresses);
