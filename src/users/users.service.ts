@@ -61,7 +61,10 @@ export class UsersService {
     this.rolesRepository = connection.getRepository(Roles);
     this.userRolesRepository = connection.getRepository(UserRoles);
     this.personRepository = connection.getRepository(Person);
-    this.groupRepository = new GroupRepository(connection.manager, tenantContext);
+    this.groupRepository = new GroupRepository(
+      connection.manager,
+      tenantContext,
+    );
     this.membershipRepository = connection.getRepository(GroupMembership);
   }
 
@@ -375,12 +378,14 @@ export class UsersService {
       }
     }
 
-    const resp = await this.repository
-      .createQueryBuilder()
-      .update()
-      .set(update)
-      .where('id = :id', { id: data.id })
-      .execute();
+    if (Object.keys(update).length > 0) {
+      await this.repository
+        .createQueryBuilder()
+        .update()
+        .set(update)
+        .where('id = :id', { id: data.id })
+        .execute();
+    }
 
     return await this.findOne(data.id);
   }

@@ -33,6 +33,7 @@ describe('UsersService', () => {
   let mockRepositories: any;
   let mockGroupRepo: any;
   let mockMembershipQb: any;
+  let mockUpdateQb: any;
 
   beforeEach(async () => {
     mockMembershipQb = {
@@ -41,6 +42,13 @@ describe('UsersService', () => {
       andWhere: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       getMany: jest.fn(),
+    };
+
+    mockUpdateQb = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue(undefined),
     };
 
     // groupRepository is a TenantAwareRepository<Group> constructed once in
@@ -60,10 +68,13 @@ describe('UsersService', () => {
         create: jest.fn(),
         update: jest.fn(),
         delete: jest.fn(),
+        createQueryBuilder: jest.fn().mockReturnValue(mockUpdateQb),
       },
       email: {
         find: jest.fn(),
+        findOne: jest.fn(),
         save: jest.fn(),
+        update: jest.fn(),
       },
       roles: {
         find: jest.fn(),
@@ -186,10 +197,12 @@ describe('UsersService', () => {
         false,
       );
 
-      await expect(
-        service.findUsersInGroup(5, requestingUser),
-      ).rejects.toThrow(ForbiddenException);
-      expect(mockRepositories.membership.createQueryBuilder).not.toHaveBeenCalled();
+      await expect(service.findUsersInGroup(5, requestingUser)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(
+        mockRepositories.membership.createQueryBuilder,
+      ).not.toHaveBeenCalled();
     });
 
     it('scopes to a single group when no FOB ancestor exists', async () => {
@@ -354,6 +367,49 @@ describe('UsersService', () => {
       // contactId appeared twice in the membership rows.
       expect(mockRepositories.user.find).toHaveBeenCalledTimes(1);
       expect(result).toHaveLength(1);
+    });
+  });
+
+  describe('update', () => {
+    const buildUser = (overrides: Partial<User> = {}): any => ({
+      id: 1,
+      contactId: 10,
+      username: 'old@example.com',
+      email: 'old@example.com',
+      isActive: true,
+      userRoles: [],
+      contact: { person: { firstName: 'A', lastName: 'B' } },
+      ...overrides,
+    });
+
+    it('updates isActive without touching email/username', async () => {
+      mockRepositories.user.findOne
+        .mockResolvedValueOnce(buildUser())
+        .mockResolvedValueOnce(buildUser({ isActive: false }));
+
+      await service.update({ id: 1, isActive: false });
+
+      expect(mockUpdateQb.set).toHaveBeenCalledWith({ isActive: false });
+      expect(mockRepositories.email.findOne).not.toHaveBeenCalled();
+      expect(mockRepositories.email.update).not.toHaveBeenCalled();
+    });
+
+    // Email/username changes are now owned exclusively by
+    // ContactsService.syncUserEmailFromContact (see contacts.service.ts),
+    // so this endpoint must never write them, even if a stale caller still
+    // sends an `email` field.
+    it('ignores an email field if one is still sent by a caller', async () => {
+      mockRepositories.user.findOne
+        .mockResolvedValueOnce(buildUser())
+        .mockResolvedValueOnce(buildUser());
+
+      await service.update({ id: 1, email: 'new@example.com' } as any);
+
+      expect(mockRepositories.user.createQueryBuilder).not.toHaveBeenCalled();
+      expect(mockUpdateQb.set).not.toHaveBeenCalledWith(
+        expect.objectContaining({ email: expect.anything() }),
+      );
+      expect(mockRepositories.email.update).not.toHaveBeenCalled();
     });
   });
 });
