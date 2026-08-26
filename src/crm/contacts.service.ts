@@ -141,6 +141,13 @@ export class ContactsService {
     tenantId: number,
     excludeContactId?: number,
   ): Promise<void> {
+    const normalized = emails.map((e) => this.normalizeEmail(e)).filter(hasValue);
+    if (new Set(normalized).size !== normalized.length) {
+      // Two emails in the same request normalize to the same value
+      // (e.g. Foo@example.com and foo@example.com) — reject before ever
+      // hitting the DB, since a DB check alone wouldn't catch this.
+      throw new BadRequestException(CONTACT_EMAIL_EXISTS_MESSAGE);
+    }
     const duplicates = await this.findExistingEmails(
       emails,
       tenantId,
@@ -494,13 +501,12 @@ export class ContactsService {
           dataType: typeof data,
         },
       });
-
-      // Set tenant from request context if not already set
-      if (!data.tenant && request?.tenant) {
-        data.tenant = request.tenant;
+      
+      const tenantId = this.tenantContext.requireTenant();
+      if (data.tenant?.id && data.tenant.id !== tenantId) {
+        throw new BadRequestException('Tenant mismatch');
       }
-
-      const tenantId = data.tenant?.id ?? this.tenantContext.requireTenant();
+      data.tenant = { id: tenantId } as Tenant;
       const incomingEmails = ((data as any).emails || [])
         .map((e: any) => e.value)
         .filter(hasValue);
@@ -600,6 +606,13 @@ export class ContactsService {
   }
 
   async update(data: Contact): Promise<Contact> {
+    const incomingEmails = (data.emails || [])
+      .map((e) => e.value)
+      .filter(hasValue);
+    if (incomingEmails.length > 0) {
+      const tenantId = this.tenantContext.requireTenant();
+      await this.assertEmailsAreUnique(incomingEmails, tenantId, data.id);
+    }
     return await this.repository.save(data);
   }
 
