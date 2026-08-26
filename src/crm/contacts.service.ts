@@ -513,7 +513,10 @@ export class ContactsService {
       if (incomingEmails.length > 0) {
         await this.assertEmailsAreUnique(incomingEmails, tenantId);
       }
-
+      // this is a minor fix for required gender
+      if (!(data as any).person?.gender) {
+        throw new BadRequestException('Contact must have a gender selected');
+      }
       const savedContact = await this.repository.save(data);
 
       this.logger.business('log', 'Contact created successfully', {
@@ -1489,6 +1492,11 @@ export class ContactsService {
   async createPerson(createPersonDto: CreatePersonDto): Promise<Contact> {    
     const tenantId = this.tenantContext.requireTenant();
     await this.assertEmailsAreUnique([createPersonDto.email], tenantId);
+    // this is a minor fix for gender
+    if (!createPersonDto.gender) {
+      throw new BadRequestException('Contact must have a gender selected');
+    }
+
     const model = getContactModel(createPersonDto);
     model.tenant = { id: tenantId } as Tenant;
     await this.getGroupRequest(createPersonDto);

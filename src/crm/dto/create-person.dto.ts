@@ -20,9 +20,9 @@ export class CreatePersonDto {
   @IsOptional()
   middleName?: string;
 
-  @IsOptional()
+  @IsNotEmpty()
   @IsEnum(Gender)
-  gender?: Gender;
+  gender: Gender;
 
   @IsOptional()
   @IsEnum(CivilStatus)
