@@ -191,8 +191,13 @@ export class ContactImportController {
           // dedup — weaker than email since name collisions within a group are possible.
           // Once child-to-parent linking lands, the parent becomes the authoritative anchor.
           // See: https://github.com/kanzucodefoundation/project-zoe-server/issues/208
+          // Emailed rows always go through createPerson(), which enforces the
+          // tenant-scoped, case-insensitive duplicate check. A row whose email
+          // already exists throws here, is caught below, and is reported as a
+          // per-row error — never silently reused/merged into the existing
+          // contact (that was the original bug).
           let person = contactModel.email
-            ? await this.service.findByEmail(contactModel.email)
+            ? null
             : await this.service.findByNameAndGroup(
                 contactModel.firstName,
                 contactModel.lastName,

@@ -59,6 +59,7 @@ import { groupCategories } from 'src/groups/groups.constants';
 import { AppLogger, ContextLogger } from 'src/utils/app-logger.service';
 import { GroupsMembershipService } from 'src/groups/services/group-membership.service';
 
+const CONTACT_EMAIL_EXISTS_MESSAGE = 'CONTACT ALREADY EXISTS WITH THAT EMAIL';
 @Injectable()
 export class ContactsService {
   private readonly repository: Repository<Contact>;
@@ -106,6 +107,55 @@ export class ContactsService {
 
   private static escapeLike(value: string): string {
     return value.replace(/[%_\\]/g, (match) => `\\${match}`);
+  }
+  
+  private normalizeEmail(email: string): string {
+    return email?.trim().toLowerCase() ?? '';
+  }
+
+  private async findExistingEmails(
+    emails: string[],
+    tenantId: number,
+    excludeContactId?: number,
+  ): Promise<string[]> {
+    const normalized = [
+      ...new Set(emails.map((e) => this.normalizeEmail(e)).filter(hasValue)),
+    ];
+    if (normalized.length === 0) return [];
+
+    const qb = this.emailRepository
+      .createQueryBuilder('email')
+      .innerJoin('email.contact', 'contact')
+      .where('contact.tenantId = :tenantId', { tenantId })
+      .andWhere('LOWER(TRIM(email.value)) IN (:...normalized)', { normalized });
+
+    if (excludeContactId) {
+      qb.andWhere('email.contactId != :excludeContactId', { excludeContactId });
+    }
+
+    return (await qb.getMany()).map((row) => this.normalizeEmail(row.value));
+  }
+
+  private async assertEmailsAreUnique(
+    emails: string[],
+    tenantId: number,
+    excludeContactId?: number,
+  ): Promise<void> {
+    const normalized = emails.map((e) => this.normalizeEmail(e)).filter(hasValue);
+    if (new Set(normalized).size !== normalized.length) {
+      // Two emails in the same request normalize to the same value
+      // (e.g. Foo@example.com and foo@example.com) — reject before ever
+      // hitting the DB, since a DB check alone wouldn't catch this.
+      throw new BadRequestException(CONTACT_EMAIL_EXISTS_MESSAGE);
+    }
+    const duplicates = await this.findExistingEmails(
+      emails,
+      tenantId,
+      excludeContactId,
+    );
+    if (duplicates.length > 0) {
+      throw new BadRequestException(CONTACT_EMAIL_EXISTS_MESSAGE);
+    }
   }
 
   async findAll(req: ContactSearchDto, user?: any): Promise<ContactListDto[]> {
@@ -451,12 +501,22 @@ export class ContactsService {
           dataType: typeof data,
         },
       });
-
-      // Set tenant from request context if not already set
-      if (!data.tenant && request?.tenant) {
-        data.tenant = request.tenant;
+      
+      const tenantId = this.tenantContext.requireTenant();
+      if (data.tenant?.id && data.tenant.id !== tenantId) {
+        throw new BadRequestException('Tenant mismatch');
       }
-
+      data.tenant = { id: tenantId } as Tenant;
+      const incomingEmails = ((data as any).emails || [])
+        .map((e: any) => e.value)
+        .filter(hasValue);
+      if (incomingEmails.length > 0) {
+        await this.assertEmailsAreUnique(incomingEmails, tenantId);
+      }
+      // this is a minor fix for required gender
+      if (!(data as any).person?.gender) {
+        throw new BadRequestException('Contact must have a gender selected');
+      }
       const savedContact = await this.repository.save(data);
 
       this.logger.business('log', 'Contact created successfully', {
@@ -549,6 +609,13 @@ export class ContactsService {
   }
 
   async update(data: Contact): Promise<Contact> {
+    const incomingEmails = (data.emails || [])
+      .map((e) => e.value)
+      .filter(hasValue);
+    if (incomingEmails.length > 0) {
+      const tenantId = this.tenantContext.requireTenant();
+      await this.assertEmailsAreUnique(incomingEmails, tenantId, data.id);
+    }
     return await this.repository.save(data);
   }
 
@@ -578,6 +645,12 @@ export class ContactsService {
 
       // Input validation
       this.validateUpdateData(data);
+
+      if (data.emails) {
+        const tenantId = this.tenantContext.requireTenant();
+        const incomingEmails = data.emails.map((e) => e.value).filter(hasValue);
+        await this.assertEmailsAreUnique(incomingEmails, tenantId, id);
+      }
 
       const existingContact = await this.repository.findOne({
         where: { id },
@@ -1274,6 +1347,12 @@ export class ContactsService {
 
       // Input validation
       this.validateUpdateData(data);
+      if (data.emails) {
+        const tenantId = this.tenantContext.requireTenant();
+        const incomingEmails = data.emails.map((e: any) => e.value).filter(hasValue);
+        await this.assertEmailsAreUnique(incomingEmails, tenantId, id);
+      }
+
 
       const existingContact = await this.repository.findOne({
         where: { id },
@@ -1410,26 +1489,16 @@ export class ContactsService {
     }
   }
 
-  async createPerson(createPersonDto: CreatePersonDto): Promise<Contact> {
-    //First check if email address exists
-    const emailData = await this.emailRepository.find({
-      where: [{ value: createPersonDto.email }],
-    });
-    if (emailData.length > 0) {
-      throw new BadRequestException({
-        message:
-          'Email already exists. This email has already been registered.',
-      });
+  async createPerson(createPersonDto: CreatePersonDto): Promise<Contact> {    
+    const tenantId = this.tenantContext.requireTenant();
+    await this.assertEmailsAreUnique([createPersonDto.email], tenantId);
+    // this is a minor fix for gender
+    if (!createPersonDto.gender) {
+      throw new BadRequestException('Contact must have a gender selected');
     }
 
     const model = getContactModel(createPersonDto);
-
-    // Set tenant from context
-    const tenantId = this.tenantContext.requireTenant();
-    Logger.log('tenantId');
-    Logger.log(tenantId);
     model.tenant = { id: tenantId } as Tenant;
-
     await this.getGroupRequest(createPersonDto);
     const newPerson = await this.repository.save(model, { reload: true });
     if (hasValue(createPersonDto.residence)) {
@@ -1609,10 +1678,14 @@ export class ContactsService {
   }
 
   async findByEmail(email: string): Promise<Contact | undefined> {
-    const emailRecord = await this.emailRepository.findOne({
-      where: { value: email },
-      relations: ['contact'],
-    });
+    const tenantId = this.tenantContext.requireTenant();
+    const normalized = this.normalizeEmail(email);
+    const emailRecord = await this.emailRepository
+      .createQueryBuilder('email')
+      .innerJoinAndSelect('email.contact', 'contact')
+      .where('contact.tenantId = :tenantId', { tenantId })
+      .andWhere('LOWER(TRIM(email.value)) = :normalized', { normalized })
+      .getOne();
     return emailRecord?.contact;
   }
 
