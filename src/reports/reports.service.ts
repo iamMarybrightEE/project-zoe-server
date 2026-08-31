@@ -4,6 +4,7 @@ import {
   NotFoundException,
   HttpStatus,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { Connection, Repository, In, Not } from 'typeorm';
 import { UserDto } from 'src/auth/dto/user.dto';
@@ -76,6 +77,14 @@ export class ReportsService {
   private static readonly MCA_REPORT_NAME = 'MC Attendance Report';
   private static readonly MCA_FIELD_LABEL = 'How many attended MC?';
   private static readonly COMPLIANCE_MAX_WEEKS_LOOKBACK = 12;
+  // Submissions are editable by their owner only through the end of the
+  // reporting period (Wednesday..the following Tuesday) they were made
+  // in. The window closes at 6 PM on that period's Sunday -- see
+  // getEditDeadline for why this is "the cycle's Sunday", not "the next
+  // Sunday after submittedAt".
+  private static readonly EDIT_WINDOW_CYCLE_START_DAY = 3; // Wednesday
+  private static readonly EDIT_WINDOW_SUNDAY_OFFSET_DAYS = 4; // Wed -> Sun
+  private static readonly EDIT_DEADLINE_HOUR = 18; // 6:00 PM
   // Weekly reports whose expected submission day is known (0=Sun..6=Sat).
   // Only reports listed here get "catch up on the day that already passed"
   // treatment in submitReport's period selection -- other weekly reports
@@ -184,6 +193,42 @@ export class ReportsService {
     const day = String(date.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
+  
+  // The edit deadline for a submission made on `submittedAt`: 6 PM on the
+  // Sunday that falls *inside the same Wed..Tue reporting cycle* as
+  // submittedAt -- not the next Sunday on the calendar after it. Those
+  // differ for a Sun/Mon/Tue submission: that's the catch-up tail of the
+  // *previous* cycle (mirroring getDueDayAwarePeriodStart's reasoning),
+  // so its deadline is the Sunday that already occurred earlier that
+  // same cycle, not a fresh Sunday a week later. Concretely: walk back
+  // to the most recent Wednesday on/before submittedAt (the cycle's
+  // start), then the deadline is always 4 days after that Wednesday.
+  // Uses local calendar fields, like formatDateKey, so the cutoff lands
+  // on the calendar day users actually see rather than shifting with UTC
+  // conversion.
+  private getEditDeadline(submittedAt: Date): Date {
+    const daysSinceCycleStart =
+      (submittedAt.getDay() -
+        ReportsService.EDIT_WINDOW_CYCLE_START_DAY +
+        7) %
+      7;
+    const cycleStart = new Date(submittedAt);
+    cycleStart.setDate(cycleStart.getDate() - daysSinceCycleStart);
+
+    const deadline = new Date(cycleStart);
+    deadline.setDate(
+      deadline.getDate() + ReportsService.EDIT_WINDOW_SUNDAY_OFFSET_DAYS,
+    );
+    deadline.setHours(ReportsService.EDIT_DEADLINE_HOUR, 0, 0, 0);
+    return deadline;
+  }
+
+  // A submission is editable only by the user who made it, and only
+  // until its edit deadline has passed.
+  private canEditSubmission(submittedAt: Date, isOwner: boolean): boolean {
+    return isOwner && new Date() <= this.getEditDeadline(submittedAt);
+  }
+
   async createReport(reportDto: ReportDto, user: UserDto): Promise<ReportDto> {
     const report = new Report();
     report.name = reportDto.name;
@@ -449,7 +494,7 @@ export class ReportsService {
     // leaves a parent submission occupying the period with no data behind it.
     let savedSubmission: ReportSubmission;
     try {
-      savedSubmission = await this.connection.transaction(async (manager) => {
+      savedSubmission = await this.connection.transaction(async(manager) => {
         const reportSubmission = new ReportSubmission();
         reportSubmission.report = report;
         reportSubmission.submittedAt = now;
@@ -641,6 +686,130 @@ export class ReportsService {
     }
 
     return response;
+  }
+
+  async updateSubmission(
+    reportId: number,
+    submissionId: number,
+    submissionDto: ReportSubmissionDto,
+    user: UserDto,
+  ): Promise<ApiResponse<ReportSubmissionDataDto>> {
+    const { data } = submissionDto;
+    const tenantId = this.tenantContext.requireTenant();
+
+    const submission = await this.reportSubmissionRepository.findOne({
+      where: {
+        id: submissionId,
+        report: { id: reportId, tenant: { id: tenantId } },
+      },
+      relations: [
+        'report',
+        'user',
+        'submissionData',
+        'submissionData.reportField',
+      ],
+    });
+    if (!submission) {
+      throw new NotFoundException(
+        `Report submission with ID ${submissionId} not found`,
+      );
+    }
+
+    // Ownership and the edit-window deadline are both enforced here, not
+    // just hidden in the UI -- canEdit on the read side is a display hint,
+    // this check is the actual authorization.
+    const isOwner = submission.user.id === user.id;
+    if (!this.canEditSubmission(submission.submittedAt, isOwner)) {
+      if (!isOwner) {
+        throw new ForbiddenException(
+          'You do not have permission to edit this submission.',
+        );
+      }
+      throw new BadRequestException(
+        'This submission can no longer be edited; the edit window has closed.',
+      );
+    }
+
+    // Same up-front field validation as submitReport: reject unknown field
+    // names before touching any row.
+    const fields = await this.reportFieldRepository.find({
+      where: { report: { id: reportId } },
+    });
+    const fieldNameToFieldMap = new Map(fields.map((f) => [f.name, f]));
+    for (const fieldName of Object.keys(data)) {
+      if (!fieldNameToFieldMap.has(fieldName)) {
+        throw new BadRequestException(
+          `Field with name '${fieldName}' not found in report`,
+        );
+      }
+    }
+
+    const existingDataByFieldName = new Map(
+      submission.submissionData.map((sd) => [sd.reportField.name, sd]),
+    );
+
+    await this.connection.transaction(async(manager) => {
+      for (const [fieldName, fieldValue] of Object.entries(data)) {
+        const existing = existingDataByFieldName.get(fieldName);
+        if (existing) {
+          existing.fieldValue = fieldValue;
+          await manager.save(ReportSubmissionData, existing);
+        } else {
+          const newRow = new ReportSubmissionData();
+          newRow.reportSubmission = submission;
+          newRow.reportField = fieldNameToFieldMap.get(fieldName);
+          newRow.fieldValue = fieldValue;
+          await manager.save(ReportSubmissionData, newRow);
+        }
+      }
+
+      // Mirror submitReport's PGA recomputation so an edited WHM Sunday
+      // Service submission never drifts out of sync with its inputs.
+      if (submission.report.functionName === 'whmSundayService') {
+        const slot = (name: string) => {
+          const v = Object.prototype.hasOwnProperty.call(data, name)
+            ? data[name]
+            : existingDataByFieldName.get(name)?.fieldValue;
+          return typeof v === 'number' ? v : parseFloat(String(v ?? 0)) || 0;
+        };
+
+        const pga =
+          slot('1Sv') +
+          slot('2Sv') +
+          slot('YXP') +
+          slot('kids') +
+          slot('local') +
+          slot('hc1') +
+          slot('hc2') +
+          slot('hc3');
+          
+        const pgaField = fieldNameToFieldMap.get('pga');
+        if (pgaField) {
+          const existingPga = existingDataByFieldName.get('pga');
+          if (existingPga) {
+            existingPga.fieldValue = String(pga);
+            await manager.save(ReportSubmissionData, existingPga);
+          } else {
+            const pgaRow = new ReportSubmissionData();
+            pgaRow.reportSubmission = submission;
+            pgaRow.reportField = pgaField;
+            pgaRow.fieldValue = String(pga);
+            await manager.save(ReportSubmissionData, pgaRow);
+          }
+        }
+      }
+    });
+
+    return {
+      data: {
+        reportId: submission.report.id,
+        submissionId: submission.id,
+        submittedAt: submission.submittedAt,
+        submittedBy: submission.user.username,
+      },
+      status: HttpStatus.OK,
+      message: 'Report submission updated successfully.',
+    };
   }
 
   async getAllReports(user?: UserDto): Promise<{ reports: any[] }> {
@@ -1136,11 +1305,25 @@ export class ReportsService {
     };
   }
 
-  async getReportSubmission(reportId: number, submissionId: number) {
+  async getReportSubmission(
+    reportId: number,
+    submissionId: number,
+    user: UserDto,
+    raw = false,
+  ) {
+    const tenantId = this.tenantContext.requireTenant();
     // Fetch the submission with its related user and submissionData (including the reportField for each submissionData)
     const submission = await this.reportSubmissionRepository.findOne({
-      where: { id: submissionId, report: { id: reportId } },
-      relations: ['user', 'submissionData', 'submissionData.reportField'],
+      where: {
+        id: submissionId,
+        report: { id: reportId, tenant: { id: tenantId } },
+      },
+      relations: [
+        'user',
+        'group',
+        'submissionData',
+        'submissionData.reportField',
+      ],
     });
 
     if (!submission) {
@@ -1148,16 +1331,41 @@ export class ReportsService {
         `Report submission with ID ${submissionId} not found`,
       );
     }
+    // View authorization, independent of canEdit below: the submission's
+    // own author can always view it. Otherwise the viewer must have
+    // access to the submission's group -- the same accessible-groups
+    // check getMyGroupsSubmissions already uses for listing -- so a
+    // valid submissionId alone is never sufficient to read another
+    // tenant member's data. A group-less submission (no associated
+    // group) can only be viewed by its owner.
+    const isOwner = submission.user.id === user.id;
+    if (!isOwner) {
+      const canView =
+        submission.group &&
+        (await this.getUserAccessibleGroups(user)).includes(
+          submission.group.id,
+        );
+      if (!canView) {
+        throw new ForbiddenException(
+          'You do not have permission to view this submission.',
+        );
+      }
+    }
 
-    // Transform submissionData into a structured object, resolving
-    // contact-ID fields (e.g. 'fellowshipMembers') to readable names
-    const nameById = await this.fetchMemberSelectorContactNames([
-      submission.submissionData,
-    ]);
-    const data = this.buildSubmissionDataRecord(
-      submission.submissionData,
-      nameById,
-    );
+
+    // raw=true is for edit-form prefill: member-selector fields come back
+    // as contact-ID arrays so checkboxes can be matched against them.
+    // raw=false (default) is for read-only display: those fields come
+    // back as a joined string of resolved names, as before.
+    let data: Record<string, any>;
+    if (raw) {
+      data = this.buildSubmissionDataRecordRaw(submission.submissionData);
+    } else {
+      const nameById = await this.fetchMemberSelectorContactNames([
+        submission.submissionData,
+      ]);
+      data = this.buildSubmissionDataRecord(submission.submissionData, nameById);
+    }
 
     // Extract labels from submissionData
     const labels = submission.submissionData.map((sd) => {
@@ -1174,6 +1382,11 @@ export class ReportsService {
       labels: labels,
       submittedAt: submission.submittedAt.toISOString(), // Ensure consistent date formatting
       submittedBy: getUserDisplayName(submission.user),
+      groupId: submission.group?.id,
+      canEdit: this.canEditSubmission(
+        submission.submittedAt,
+        submission.user.id === user.id,
+      ),
     };
   }
 
@@ -1253,6 +1466,30 @@ export class ReportsService {
           acc[sd.reportField.name] = ids
             .map((id) => nameById.get(Number(id)) || `Unknown (${id})`)
             .join(', ');
+        } else {
+          acc[sd.reportField.name] = sd.fieldValue;
+        }
+        return acc;
+      },
+      {} as Record<string, any>,
+    );
+  }
+  /**
+   * Same as buildSubmissionDataRecord, but for dynamic_member_selector
+   * fields returns the raw array of numeric contact IDs instead of
+   * resolving them to a joined display string. Used when populating an
+   * edit form -- the checkbox list needs IDs to match against, not the
+   * human-readable names the read-only details view shows.
+   */
+  private buildSubmissionDataRecordRaw(
+    submissionData: ReportSubmissionData[],
+  ): Record<string, any> {
+    return submissionData.reduce(
+      (acc, sd) => {
+        if (this.isDynamicMemberSelectorField(sd.reportField)) {
+          acc[sd.reportField.name] = parsePostgresTextArray(
+            sd.fieldValue,
+          ).map(Number);
         } else {
           acc[sd.reportField.name] = sd.fieldValue;
         }
@@ -1532,7 +1769,10 @@ export class ReportsService {
           submission.submissionData,
           nameById,
         ),
-        canEdit: false, // submission.user.id === user.id // User can edit their own submissions. @TODOKEY: Temporarily disabled
+        canEdit: this.canEditSubmission(
+          submission.submittedAt,
+          submission.user.id === user.id,
+        ),
       })),
       pagination: {
         total,
@@ -1640,7 +1880,10 @@ export class ReportsService {
           submission.submissionData,
           nameById,
         ),
-        canEdit: false,
+        canEdit: this.canEditSubmission(
+          submission.submittedAt,
+          submission.user.id === user.id,
+        ),
       })),
       columns,
       pagination: {
