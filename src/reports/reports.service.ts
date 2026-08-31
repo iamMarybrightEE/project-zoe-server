@@ -83,7 +83,7 @@ export class ReportsService {
   // getEditDeadline for why this is "the cycle's Sunday", not "the next
   // Sunday after submittedAt".
   private static readonly EDIT_WINDOW_CYCLE_START_DAY = 3; // Wednesday
-  private static readonly EDIT_WINDOW_SUNDAY_OFFSET_DAYS = 5; // Wed -> Sun
+  private static readonly EDIT_WINDOW_SUNDAY_OFFSET_DAYS = 4; // Wed -> Sun
   private static readonly EDIT_DEADLINE_HOUR = 18; // 6:00 PM
   // Weekly reports whose expected submission day is known (0=Sun..6=Sat).
   // Only reports listed here get "catch up on the day that already passed"
