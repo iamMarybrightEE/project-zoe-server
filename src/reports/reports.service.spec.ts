@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ReportsService } from './reports.service';
 import { UsersService } from '../users/users.service';
 import { GroupsService } from '../groups/services/groups.service';
@@ -1826,6 +1826,286 @@ describe('ReportsService', () => {
 
       expect(result.groups[0].missedWeeks).toEqual(['2026-07-26']);
       expect(result.groups[0].missingCurrentWeek).toBe(true);
+    });
+  });
+  describe('canEdit flag on submissions', () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    // submittedAt is a Wednesday; the edit deadline is the following
+    // Sunday (2024-06-16) at 18:00 local time.
+    const makeSubmission = (overrides: Partial<any> = {}) => ({
+      id: 1,
+      report: { id: 1, name: 'Weekly Report' },
+      group: { id: 10, name: 'MC Nairobi' },
+      user: { id: 7, username: 'shepherd' },
+      submittedAt: new Date('2024-06-12T09:00:00'),
+      submissionData: [],
+      ...overrides,
+    });
+
+    it('is true for the owner before the Sunday 6pm deadline', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00')); // Saturday
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission(),
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(true);
+    });
+
+    it('is false once the Sunday 6pm deadline has passed', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-17T09:00:00')); // Following Monday
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission(),
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(false);
+    });
+
+    it('is true right up to 6pm on the Sunday the submission itself was made', async () => {
+      const sundaySubmittedAt = new Date('2024-06-16T10:00:00');
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-16T17:59:00'));
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission({ submittedAt: sundaySubmittedAt }),
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(true);
+    });
+
+    it('is false immediately after 6pm on the Sunday the submission itself was made', async () => {
+      const sundaySubmittedAt = new Date('2024-06-16T10:00:00');
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-16T18:01:00'));
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission({ submittedAt: sundaySubmittedAt }),
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(false);
+    });
+
+    it('is false for group submissions the current user did not create, even before the deadline', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00')); // Saturday
+      mockRepositories.groupMembership.find.mockResolvedValue([
+        { groupId: 10 },
+      ]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10]);
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission({ user: { id: 999, username: 'someone-else' } }),
+      ]);
+
+      const result = await service.getMyGroupsSubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(false);
+    });
+    it('closes the edit window at the cycle Sunday for a Monday catch-up submission, not a week later', async () => {
+      // 2024-06-17 is the Monday immediately after the Sunday
+      // (2024-06-16) inside the Wed(6/12)..Tue(6/18) cycle. A submission
+      // made *on* that Monday is the catch-up tail of that cycle, so its
+      // deadline is the Sunday that already passed -- not the following
+      // Sunday (6/23), which the old "next Sunday from submittedAt" logic
+      // would have wrongly returned, granting a full extra week.
+      const mondayCatchUpSubmittedAt = new Date('2024-06-17T09:00:00');
+      jest
+        .useFakeTimers()
+        .setSystemTime(new Date('2024-06-17T09:05:00')); // moments after submitting
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission({ submittedAt: mondayCatchUpSubmittedAt }),
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(false);
+    });
+
+    it(''should allow edits on Sunday 6/16 just before the 18:00 deadline'', async () => {
+      // Sanity check the other direction: a submission on the cycle's own
+      // Wednesday is still editable well into the following week, right
+      // up to its own cycle's Sunday deadline (6/16 18:00) -- confirms
+      // the fix didn't accidentally shrink the normal window too.
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-16T17:59:00'));
+      mockRepositories.reportSubmission.find.mockResolvedValue([
+        makeSubmission(), // submittedAt 2024-06-12 (Wednesday)
+      ]);
+      mockRepositories.reportSubmission.count = jest.fn().mockResolvedValue(1);
+
+      const result = await service.getMySubmissions(
+        { id: 7, contactId: 3 },
+        {},
+      );
+
+      expect(result.submissions[0].canEdit).toBe(true);
+    });
+  });
+  describe('updateSubmission', () => {
+    const mockUser = { id: 7, contactId: 3 } as any;
+
+    const makeOwnedSubmission = (overrides: Partial<any> = {}) => ({
+      id: 55,
+      report: { id: 1, name: 'Weekly Report', functionName: undefined },
+      user: { id: 7, username: 'shepherd' },
+      submittedAt: new Date('2024-06-12T09:00:00'), // Wednesday
+      submissionData: [
+        { reportField: { name: 'attendance' }, fieldValue: '25' },
+      ],
+      ...overrides,
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('updates fields for the owner within the edit window', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00')); // Saturday, deadline is Sunday 6pm
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeOwnedSubmission(),
+      );
+      mockRepositories.reportField.find.mockResolvedValue([
+        { name: 'attendance' },
+      ]);
+      mockRepositories.reportSubmissionData.save.mockResolvedValue({});
+
+      const result = await service.updateSubmission(
+        1,
+        55,
+        { data: { attendance: '30' } } as any,
+        mockUser,
+      );
+
+      expect(result.status).toBe(200);
+      expect(mockRepositories.reportSubmissionData.save).toHaveBeenCalledWith(
+        expect.objectContaining({ fieldValue: '30' }),
+      );
+    });
+
+    it('throws ForbiddenException when a non-owner attempts to edit', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00'));
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeOwnedSubmission({ user: { id: 999, username: 'other' } }),
+      );
+
+      await expect(
+        service.updateSubmission(
+          1,
+          55,
+          { data: { attendance: '30' } } as any,
+          mockUser,
+        ),
+      ).rejects.toThrow(ForbiddenException);
+      expect(mockRepositories.reportSubmissionData.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when the edit window has closed for the owner', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-17T09:00:00')); // Monday, after Sunday 6pm
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeOwnedSubmission(),
+      );
+
+      await expect(
+        service.updateSubmission(
+          1,
+          55,
+          { data: { attendance: '30' } } as any,
+          mockUser,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockRepositories.reportSubmissionData.save).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the submission does not exist', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.updateSubmission(1, 999, { data: {} } as any, mockUser),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects unknown field names before writing anything', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00'));
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeOwnedSubmission(),
+      );
+      mockRepositories.reportField.find.mockResolvedValue([
+        { name: 'attendance' },
+      ]);
+
+      await expect(
+        service.updateSubmission(
+          1,
+          55,
+          { data: { notAField: '1' } } as any,
+          mockUser,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockRepositories.reportSubmissionData.save).not.toHaveBeenCalled();
+    });
+
+    it('recomputes PGA for WHM Sunday Service submissions on edit', async () => {
+      jest.useFakeTimers().setSystemTime(new Date('2024-06-15T10:00:00'));
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeOwnedSubmission({
+          report: {
+            id: 1,
+            name: 'Sunday Service',
+            functionName: 'whmSundayService',
+          },
+          submissionData: [
+            { reportField: { name: '1Sv' }, fieldValue: '10' },
+            { reportField: { name: 'pga' }, fieldValue: '10' },
+          ],
+        }),
+      );
+      mockRepositories.reportField.find.mockResolvedValue([
+        { name: '1Sv' },
+        { name: 'pga' },
+      ]);
+      mockRepositories.reportSubmissionData.save.mockResolvedValue({});
+
+      await service.updateSubmission(
+        1,
+        55,
+        { data: { '1Sv': '15' } } as any,
+        mockUser,
+      );
+
+      expect(mockRepositories.reportSubmissionData.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reportField: { name: 'pga' },
+          fieldValue: '15',
+        }),
+      );
     });
   });
 });

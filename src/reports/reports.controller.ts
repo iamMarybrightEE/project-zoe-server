@@ -263,6 +263,8 @@ export class ReportsController {
   async getReportSubmission(
     @Param('reportId') reportId: number,
     @Param('submissionId') submissionId: number,
+    @Query('raw') raw: string | undefined,
+    @Request() request,
   ) {
     this.logger.apiLog('log', 'Get specific report submission request received', {
       operation: 'getReportSubmission',
@@ -270,9 +272,40 @@ export class ReportsController {
       metadata: {
         reportId,
         submissionId,
+        raw: raw === 'true',
+        userId: request.user?.id,
       },
     });
-    return this.reportService.getReportSubmission(reportId, submissionId);
+    return this.reportService.getReportSubmission(
+      reportId,
+      submissionId,
+      request.user,
+      raw === 'true',
+    );
+  }
+
+  @Put(':reportId/submissions/:submissionId')
+  async updateReportSubmission(
+    @Param('reportId', ParseIntPipe) reportId: number,
+    @Param('submissionId', ParseIntPipe) submissionId: number,
+    @Body() submissionDto: ReportSubmissionDto,
+    @Request() request,
+  ): Promise<ApiResponse<ReportSubmissionDataDto>> {
+    this.logger.apiLog('log', 'Update report submission request received', {
+      operation: 'updateReportSubmission',
+      resource: 'reports',
+      metadata: {
+        reportId,
+        submissionId,
+        userId: request.user?.id,
+      },
+    });
+    return await this.reportService.updateSubmission(
+      reportId,
+      submissionId,
+      submissionDto,
+      request.user,
+    );
   }
 
   @Post(':reportId/send-weekly-email')
