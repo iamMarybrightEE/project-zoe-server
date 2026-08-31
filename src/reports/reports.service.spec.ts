@@ -1950,7 +1950,7 @@ describe('ReportsService', () => {
       expect(result.submissions[0].canEdit).toBe(false);
     });
 
-    it(''should allow edits on Sunday 6/16 just before the 18:00 deadline'', async () => {
+    it('should allow edits on Sunday 6/16 just before the 18:00 deadline', async () => {
       // Sanity check the other direction: a submission on the cycle's own
       // Wednesday is still editable well into the following week, right
       // up to its own cycle's Sunday deadline (6/16 18:00) -- confirms
@@ -2106,6 +2106,104 @@ describe('ReportsService', () => {
           fieldValue: '15',
         }),
       );
+    });
+  });
+    describe('getReportSubmission', () => {
+    const mockUser = { id: 7, contactId: 3 } as any;
+
+    const makeSubmission = (overrides: Partial<any> = {}) => ({
+      id: 40,
+      report: { id: 1 },
+      user: { id: 7, username: 'shepherd' },
+      group: { id: 10, name: 'MC Nairobi' },
+      submissionData: [],
+      submittedAt: new Date('2024-06-12T09:00:00'),
+      ...overrides,
+    });
+
+    it('scopes the lookup to the active tenant', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission(),
+      );
+
+      await service.getReportSubmission(1, 40, mockUser);
+
+      expect(mockRepositories.reportSubmission.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: 40,
+            report: { id: 1, tenant: { id: 1 } },
+          }),
+        }),
+      );
+    });
+
+    it('includes the group relation so groupId is populated in the response', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission(),
+      );
+
+      const result = await service.getReportSubmission(1, 40, mockUser);
+
+      expect(result.groupId).toBe(10);
+      expect(mockRepositories.reportSubmission.findOne).toHaveBeenCalledWith(
+        expect.objectContaining({
+          relations: expect.arrayContaining(['group']),
+        }),
+      );
+    });
+
+    it('allows the submission owner to view it', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission(),
+      );
+
+      const result = await service.getReportSubmission(1, 40, mockUser);
+
+      expect(result.id).toBe(40);
+    });
+
+    it('allows a user with access to the submission group to view it', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission({ user: { id: 999, username: 'other' } }),
+      );
+      mockRepositories.groupMembership.find.mockResolvedValue([
+        { groupId: 10 },
+      ]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([10]);
+
+      const result = await service.getReportSubmission(1, 40, mockUser);
+
+      expect(result.id).toBe(40);
+    });
+
+    it('throws ForbiddenException for a non-owner with no access to the submission group', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission({ user: { id: 999, username: 'other' } }),
+      );
+      mockRepositories.groupMembership.find.mockResolvedValue([]);
+      mockGroupTreeService.getGroupAndAllChildren = jest
+        .fn()
+        .mockResolvedValue([]);
+
+      await expect(
+        service.getReportSubmission(1, 40, mockUser),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('throws ForbiddenException for a non-owner viewing a group-less submission', async () => {
+      mockRepositories.reportSubmission.findOne.mockResolvedValue(
+        makeSubmission({
+          user: { id: 999, username: 'other' },
+          group: undefined,
+        }),
+      );
+
+      await expect(
+        service.getReportSubmission(1, 40, mockUser),
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 });

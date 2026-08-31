@@ -494,7 +494,7 @@ export class ReportsService {
     // leaves a parent submission occupying the period with no data behind it.
     let savedSubmission: ReportSubmission;
     try {
-      savedSubmission = await this.connection.transaction(async (manager) => {
+      savedSubmission = await this.connection.transaction(async(manager) => {
         const reportSubmission = new ReportSubmission();
         reportSubmission.report = report;
         reportSubmission.submittedAt = now;
@@ -748,7 +748,7 @@ export class ReportsService {
       submission.submissionData.map((sd) => [sd.reportField.name, sd]),
     );
 
-    await this.connection.transaction(async (manager) => {
+    await this.connection.transaction(async(manager) => {
       for (const [fieldName, fieldValue] of Object.entries(data)) {
         const existing = existingDataByFieldName.get(fieldName);
         if (existing) {
@@ -1311,10 +1311,19 @@ export class ReportsService {
     user: UserDto,
     raw = false,
   ) {
+    const tenantId = this.tenantContext.requireTenant();
     // Fetch the submission with its related user and submissionData (including the reportField for each submissionData)
     const submission = await this.reportSubmissionRepository.findOne({
-      where: { id: submissionId, report: { id: reportId } },
-      relations: ['user', 'submissionData', 'submissionData.reportField'],
+      where: {
+        id: submissionId,
+        report: { id: reportId, tenant: { id: tenantId } },
+      },
+      relations: [
+        'user',
+        'group',
+        'submissionData',
+        'submissionData.reportField',
+      ],
     });
 
     if (!submission) {
@@ -1322,6 +1331,27 @@ export class ReportsService {
         `Report submission with ID ${submissionId} not found`,
       );
     }
+    // View authorization, independent of canEdit below: the submission's
+    // own author can always view it. Otherwise the viewer must have
+    // access to the submission's group -- the same accessible-groups
+    // check getMyGroupsSubmissions already uses for listing -- so a
+    // valid submissionId alone is never sufficient to read another
+    // tenant member's data. A group-less submission (no associated
+    // group) can only be viewed by its owner.
+    const isOwner = submission.user.id === user.id;
+    if (!isOwner) {
+      const canView =
+        submission.group &&
+        (await this.getUserAccessibleGroups(user)).includes(
+          submission.group.id,
+        );
+      if (!canView) {
+        throw new ForbiddenException(
+          'You do not have permission to view this submission.',
+        );
+      }
+    }
+
 
     // raw=true is for edit-form prefill: member-selector fields come back
     // as contact-ID arrays so checkboxes can be matched against them.
