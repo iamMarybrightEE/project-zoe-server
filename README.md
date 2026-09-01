@@ -114,12 +114,6 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md#database-migrations) for the full workfl
 | `master` | Production — auto-deploys on push |
 | `develop` | Staging — auto-deploys on push |
 
-The CI pipeline creates the `.env` from a base64-encoded GitHub secret. To encode a local `.env` for CI use:
-
-```bash
-openssl base64 -A -in .env -out .env.encrypted
-```
-
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
