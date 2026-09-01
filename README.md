@@ -4,6 +4,8 @@ Project Zoe is a church relationship management system (RMS) centred on people. 
 
 This repo holds the NestJS API server.
 
+**Documentation:** [docs.projectzoe.org](https://docs.projectzoe.org)
+
 ## Tech stack
 
 - **Runtime:** Node.js 18, TypeScript
