@@ -1694,7 +1694,7 @@ export class ContactsService {
       throw new NotFoundException(`Contact with id ${id} not found`);
     }
 
-    await this.connection.transaction(async (manager) => {
+    await this.connection.transaction(async(manager) => {
       await manager
         .createQueryBuilder()
         .update(GroupMembership)
